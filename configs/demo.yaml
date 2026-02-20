@@ -1,0 +1,72 @@
+# HSM-PySpark Demo Configuration
+# Robotics Session Detection
+
+version: "1.0"
+name: "robotics_demo"
+
+# Data schema configuration
+schema:
+  entity_key: "robot_id"
+  timestamp_col: "timestamp"
+  signal_col: "signal_type"
+  value_col: "signal_value"
+  max_hierarchy_depth: 3
+
+# Session definitions
+states:
+  # Level 0: Activity sessions (gap-based)
+  # A new activity session starts after 5 minutes of inactivity
+  activity_session:
+    level: 0
+    detection_type: "gap"
+    gap_threshold: "5min"
+    description: "Top-level activity session based on data gaps"
+
+  # Level 1: Movement sessions (threshold-based)
+  # Movement = velocity > 0.3 sustained for 2+ seconds
+  movement_session:
+    level: 1
+    parent: "activity_session"
+    detection_type: "threshold"
+    signal: "velocity"
+    entry_condition:
+      threshold: "> 0.3"
+      sustained_duration: "2s"
+    exit_condition:
+      threshold: "< 0.1"
+      sustained_duration: "1s"
+    description: "Movement detected when velocity exceeds threshold"
+
+  # Level 2: Micro-movements (status-based)
+  # Detected by status signal changes
+  micro_movement:
+    level: 2
+    parent: "movement_session"
+    detection_type: "signal_match"
+    signal: "status"
+    entry_values: [10, 20, 30, 40, 50, 60]  # Micro-movement status codes
+    exit_values: [0, 1, 2]  # Idle/disconnected status codes
+    description: "Fine-grained movement phases (approach, grasp, lift, etc.)"
+
+# Exception handling
+exceptions:
+  orphan_child:
+    action: "mark_orphan"
+    log_level: "WARNING"
+  data_anomaly:
+    detection:
+      - signal: "position_x"
+        condition: "> 9000"  # Impossible position
+      - signal: "force"
+        condition: "> 500"   # Impossible force
+    action: "flag_anomaly"
+
+# Output configuration
+output:
+  session_table: "detected_sessions"
+  include_metrics: true
+  metrics:
+    - session_duration
+    - event_count
+    - signal_value_avg
+    - signal_value_max
