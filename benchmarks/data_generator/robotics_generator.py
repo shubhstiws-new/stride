@@ -113,7 +113,7 @@ class RoboticsDataGenerator:
             # Check for data gaps (simulate network issues)
             if self.rng.random() < self.gap_rate:
                 gap_duration = self.rng.integers(5, 60)  # 5-60 samples gap
-                current_time += timedelta(milliseconds=interval_ms * gap_duration)
+                current_time += timedelta(milliseconds=int(interval_ms * gap_duration))
                 sample_idx += gap_duration
                 continue
 
