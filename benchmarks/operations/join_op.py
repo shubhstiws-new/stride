@@ -15,6 +15,18 @@ from pathlib import Path
 
 from benchmarks.operations import MatrixResult, make_error_result
 
+# Column name candidates in priority order (unified schema first, demo fallbacks second)
+_JOIN_COL_CANDIDATES = ["task_id", "_task_id", "task_index", "robot_id"]
+_PAIR_COL_CANDIDATES = ["episode_id", "robot_id", "_connection_id", "signal_type"]
+
+
+def _resolve_col(columns: list[str], candidates: list[str]) -> str:
+    """Return the first candidate column that exists in columns."""
+    for c in candidates:
+        if c in columns:
+            return c
+    raise KeyError(f"None of {candidates} found in columns: {columns}")
+
 
 def _get_data_info(data_path: str) -> tuple[int, float]:
     files = list(Path(data_path).glob("*.parquet"))
@@ -31,10 +43,12 @@ def _run_polars(data_path: str) -> tuple[int, float, float, float, int]:
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    # Deduplicate to (task_id, episode_id) pairs to keep join tractable
-    pairs = df.select(["task_id", "episode_id"]).unique()
-    joined = pairs.join(pairs, on="task_id", how="inner", suffix="_b").filter(
-        pl.col("episode_id") != pl.col("episode_id_b")
+    join_col = _resolve_col(df.columns, _JOIN_COL_CANDIDATES)
+    pair_col = _resolve_col(df.columns, _PAIR_COL_CANDIDATES)
+    # Deduplicate to (join_col, pair_col) pairs to keep join tractable
+    pairs = df.select([join_col, pair_col]).unique()
+    joined = pairs.join(pairs, on=join_col, how="inner", suffix="_b").filter(
+        pl.col(pair_col) != pl.col(f"{pair_col}_b")
     )
     result_rows = len(joined)
     compute_time = time.perf_counter() - t1
@@ -55,16 +69,20 @@ def _run_duckdb(data_path: str) -> tuple[int, float, float, float, int]:
     n = con.execute(f"SELECT COUNT(*) FROM read_parquet('{pattern}')").fetchone()[0]
     load_time = time.perf_counter() - t0
 
+    cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{pattern}') LIMIT 0").fetchall()]
+    join_col = _resolve_col(cols, _JOIN_COL_CANDIDATES)
+    pair_col = _resolve_col(cols, _PAIR_COL_CANDIDATES)
+
     t1 = time.perf_counter()
     result = con.execute(f"""
         WITH pairs AS (
-            SELECT DISTINCT task_id, episode_id
+            SELECT DISTINCT {join_col}, {pair_col}
             FROM read_parquet('{pattern}')
         )
         SELECT COUNT(*) AS pair_count
         FROM pairs a
-        JOIN pairs b ON a.task_id = b.task_id
-        WHERE a.episode_id != b.episode_id
+        JOIN pairs b ON a.{join_col} = b.{join_col}
+        WHERE a.{pair_col} != b.{pair_col}
     """).fetchone()
     result_rows = result[0]
     compute_time = time.perf_counter() - t1
@@ -87,9 +105,11 @@ def _run_pandas(data_path: str) -> tuple[int, float, float, float, int]:
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    pairs = df[["task_id", "episode_id"]].drop_duplicates()
-    joined = pairs.merge(pairs, on="task_id", suffixes=("_a", "_b"))
-    joined = joined[joined["episode_id_a"] != joined["episode_id_b"]]
+    join_col = _resolve_col(list(df.columns), _JOIN_COL_CANDIDATES)
+    pair_col = _resolve_col(list(df.columns), _PAIR_COL_CANDIDATES)
+    pairs = df[[join_col, pair_col]].drop_duplicates()
+    joined = pairs.merge(pairs, on=join_col, suffixes=("_a", "_b"))
+    joined = joined[joined[f"{pair_col}_a"] != joined[f"{pair_col}_b"]]
     result_rows = len(joined)
     compute_time = time.perf_counter() - t1
 
@@ -106,14 +126,16 @@ def _run_dask(data_path: str) -> tuple[int, float, float, float, int]:
 
     t0 = time.perf_counter()
     ddf = dd.read_parquet(pattern)
-    df = ddf[["task_id", "episode_id"]].drop_duplicates().compute()
+    cols = list(ddf.columns)
+    join_col = _resolve_col(cols, _JOIN_COL_CANDIDATES)
+    pair_col = _resolve_col(cols, _PAIR_COL_CANDIDATES)
+    df = ddf[[join_col, pair_col]].drop_duplicates().compute()
     n_approx = len(ddf)  # note: may trigger extra compute; use len of full df
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    import pandas as pd
-    joined = df.merge(df, on="task_id", suffixes=("_a", "_b"))
-    joined = joined[joined["episode_id_a"] != joined["episode_id_b"]]
+    joined = df.merge(df, on=join_col, suffixes=("_a", "_b"))
+    joined = joined[joined[f"{pair_col}_a"] != joined[f"{pair_col}_b"]]
     result_rows = len(joined)
     # Reload to get true n
     n = len(dd.read_parquet(pattern).compute())
@@ -150,10 +172,12 @@ def _run_pyspark(data_path: str, hardware_cfg: dict) -> tuple[int, float, float,
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    pairs = df.select("task_id", "episode_id").distinct()
+    join_col = _resolve_col(df.columns, _JOIN_COL_CANDIDATES)
+    pair_col = _resolve_col(df.columns, _PAIR_COL_CANDIDATES)
+    pairs = df.select(join_col, pair_col).distinct()
     a = pairs.alias("a")
     b = pairs.alias("b")
-    joined = a.join(b, on="task_id").filter(F.col("a.episode_id") != F.col("b.episode_id"))
+    joined = a.join(b, on=join_col).filter(F.col(f"a.{pair_col}") != F.col(f"b.{pair_col}"))
     result_rows = joined.count()
     compute_time = time.perf_counter() - t1
 
@@ -199,10 +223,12 @@ def _run_pyspark_rapids(data_path: str, hardware_cfg: dict) -> tuple[int, float,
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    pairs = df.select("task_id", "episode_id").distinct()
+    join_col = _resolve_col(df.columns, _JOIN_COL_CANDIDATES)
+    pair_col = _resolve_col(df.columns, _PAIR_COL_CANDIDATES)
+    pairs = df.select(join_col, pair_col).distinct()
     a = pairs.alias("a")
     b = pairs.alias("b")
-    joined = a.join(b, on="task_id").filter(F.col("a.episode_id") != F.col("b.episode_id"))
+    joined = a.join(b, on=join_col).filter(F.col(f"a.{pair_col}") != F.col(f"b.{pair_col}"))
     result_rows = joined.count()
     compute_time = time.perf_counter() - t1
 
@@ -221,9 +247,11 @@ def _run_cudf(data_path: str) -> tuple[int, float, float, float, int]:
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    pairs = df[["task_id", "episode_id"]].drop_duplicates()
-    joined = pairs.merge(pairs, on="task_id", suffixes=("_a", "_b"))
-    joined = joined[joined["episode_id_a"] != joined["episode_id_b"]]
+    join_col = _resolve_col(list(df.columns), _JOIN_COL_CANDIDATES)
+    pair_col = _resolve_col(list(df.columns), _PAIR_COL_CANDIDATES)
+    pairs = df[[join_col, pair_col]].drop_duplicates()
+    joined = pairs.merge(pairs, on=join_col, suffixes=("_a", "_b"))
+    joined = joined[joined[f"{pair_col}_a"] != joined[f"{pair_col}_b"]]
     result_rows = len(joined)
     compute_time = time.perf_counter() - t1
 

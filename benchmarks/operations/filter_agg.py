@@ -1,7 +1,7 @@
 """
 Operation 2: Filter + Aggregation.
 
-WHERE task_id IN ['0','1','2','3','4']
+WHERE task_id IN (first 5 distinct task_ids)
 → GROUP BY episode_id
 → AVG(signal_value), STDDEV(signal_value), COUNT(*)
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 from benchmarks.operations import MatrixResult, make_error_result
 
-_TASK_FILTER = ["0", "1", "2", "3", "4"]
+_NUM_TASK_FILTER = 5  # number of distinct task_id values to filter on
 
 # Column name candidates in priority order (unified schema first, demo fallbacks second)
 _TASK_COL_CANDIDATES = ["task_id", "_task_id", "task_index", "robot_id"]
@@ -48,8 +48,16 @@ def _run_polars(data_path: str) -> tuple[int, float, float, float, int]:
     t1 = time.perf_counter()
     task_col = _resolve_col(df.columns, _TASK_COL_CANDIDATES)
     group_col = _resolve_col(df.columns, _GROUP_COL_CANDIDATES)
+    # Dynamically discover the first N distinct task_id values
+    task_filter = (
+        df.select(pl.col(task_col).cast(pl.Utf8))
+        .unique()
+        .sort(task_col)
+        .head(_NUM_TASK_FILTER)[task_col]
+        .to_list()
+    )
     result = (
-        df.filter(pl.col(task_col).cast(pl.Utf8).is_in(_TASK_FILTER))
+        df.filter(pl.col(task_col).cast(pl.Utf8).is_in(task_filter))
         .group_by(group_col)
         .agg(
             pl.col("signal_value").mean().alias("avg_value"),
@@ -79,7 +87,14 @@ def _run_duckdb(data_path: str) -> tuple[int, float, float, float, int]:
     cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{pattern}') LIMIT 0").fetchall()]
     task_col = _resolve_col(cols, _TASK_COL_CANDIDATES)
     group_col = _resolve_col(cols, _GROUP_COL_CANDIDATES)
-    task_list = ", ".join(f"'{t}'" for t in _TASK_FILTER)
+    # Dynamically discover the first N distinct task_id values
+    task_vals = con.execute(f"""
+        SELECT DISTINCT CAST({task_col} AS VARCHAR) AS tid
+        FROM read_parquet('{pattern}')
+        ORDER BY tid
+        LIMIT {_NUM_TASK_FILTER}
+    """).fetchall()
+    task_list = ", ".join(f"'{r[0]}'" for r in task_vals)
     t1 = time.perf_counter()
     result = con.execute(f"""
         SELECT {group_col},
@@ -113,7 +128,8 @@ def _run_pandas(data_path: str) -> tuple[int, float, float, float, int]:
     t1 = time.perf_counter()
     task_col = _resolve_col(list(df.columns), _TASK_COL_CANDIDATES)
     group_col = _resolve_col(list(df.columns), _GROUP_COL_CANDIDATES)
-    filtered = df[df[task_col].astype(str).isin(_TASK_FILTER)]
+    task_filter = sorted(df[task_col].astype(str).unique())[:_NUM_TASK_FILTER]
+    filtered = df[df[task_col].astype(str).isin(task_filter)]
     result = filtered.groupby(group_col)["signal_value"].agg(["mean", "std", "count"])
     result_rows = len(result)
     compute_time = time.perf_counter() - t1
@@ -137,7 +153,8 @@ def _run_dask(data_path: str) -> tuple[int, float, float, float, int]:
     t1 = time.perf_counter()
     task_col = _resolve_col(list(ddf.columns), _TASK_COL_CANDIDATES)
     group_col = _resolve_col(list(ddf.columns), _GROUP_COL_CANDIDATES)
-    filtered = ddf[ddf[task_col].astype(str).isin(_TASK_FILTER)]
+    task_filter = sorted(ddf[task_col].astype(str).unique().compute().tolist())[:_NUM_TASK_FILTER]
+    filtered = ddf[ddf[task_col].astype(str).isin(task_filter)]
     result = (
         filtered.groupby(group_col)["signal_value"]
         .agg(["mean", "std", "count"])
@@ -179,8 +196,13 @@ def _run_pyspark(data_path: str, hardware_cfg: dict) -> tuple[int, float, float,
     t1 = time.perf_counter()
     task_col = _resolve_col(df.columns, _TASK_COL_CANDIDATES)
     group_col = _resolve_col(df.columns, _GROUP_COL_CANDIDATES)
+    # Dynamically discover the first N distinct task_id values
+    task_filter = [
+        row[0] for row in
+        df.select(F.col(task_col).cast("string")).distinct().orderBy(task_col).limit(_NUM_TASK_FILTER).collect()
+    ]
     result = (
-        df.filter(F.col(task_col).cast("string").isin(_TASK_FILTER))
+        df.filter(F.col(task_col).cast("string").isin(task_filter))
         .groupBy(group_col)
         .agg(
             F.avg("signal_value").alias("avg_value"),
@@ -238,8 +260,12 @@ def _run_pyspark_rapids(data_path: str, hardware_cfg: dict) -> tuple[int, float,
     t1 = time.perf_counter()
     task_col = _resolve_col(df.columns, _TASK_COL_CANDIDATES)
     group_col = _resolve_col(df.columns, _GROUP_COL_CANDIDATES)
+    task_filter = [
+        row[0] for row in
+        df.select(F.col(task_col).cast("string")).distinct().orderBy(task_col).limit(_NUM_TASK_FILTER).collect()
+    ]
     result = (
-        df.filter(F.col(task_col).cast("string").isin(_TASK_FILTER))
+        df.filter(F.col(task_col).cast("string").isin(task_filter))
         .groupBy(group_col)
         .agg(
             F.avg("signal_value").alias("avg_value"),
@@ -267,7 +293,8 @@ def _run_cudf(data_path: str) -> tuple[int, float, float, float, int]:
     t1 = time.perf_counter()
     task_col = _resolve_col(list(df.columns), _TASK_COL_CANDIDATES)
     group_col = _resolve_col(list(df.columns), _GROUP_COL_CANDIDATES)
-    filtered = df[df[task_col].astype(str).isin(_TASK_FILTER)]
+    task_filter = sorted(df[task_col].astype(str).unique().to_pandas().tolist())[:_NUM_TASK_FILTER]
+    filtered = df[df[task_col].astype(str).isin(task_filter)]
     result = (
         filtered.groupby(group_col)["signal_value"]
         .agg(["mean", "std", "count"])
