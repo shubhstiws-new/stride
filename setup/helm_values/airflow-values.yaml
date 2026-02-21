@@ -10,7 +10,7 @@ executor: KubernetesExecutor
 images:
   airflow:
     repository: apache/airflow
-    tag: "2.9.2"
+    tag: "3.0.2"
     pullPolicy: IfNotPresent
 
 # ── Resources ─────────────────────────────────────────────────────────────────
@@ -77,7 +77,7 @@ config:
   kubernetes_executor:
     namespace: "hsm-bench"
     worker_container_repository: apache/airflow
-    worker_container_tag: "2.9.2"
+    worker_container_tag: "3.0.2"
     delete_worker_pods: "True"
     delete_worker_pods_on_failure: "False"
     worker_pods_creation_batch_size: "16"
