@@ -163,12 +163,13 @@ def make_task(
     # GPU pods need the nvidia RuntimeClass to access GPUs
     extra_kwargs = {}
     if profile in ("gpu", "spark-rapids"):
-        extra_kwargs["pod_override"] = k8s.V1Pod(
-            spec=k8s.V1PodSpec(
-                runtime_class_name="nvidia",
-                containers=[k8s.V1Container(name="base")],
-            )
-        )
+        extra_kwargs["pod_template_dict"] = {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "spec": {
+                "runtimeClassName": "nvidia",
+            },
+        }
 
     return KubernetesPodOperator(
         task_id=task_id,
