@@ -35,8 +35,9 @@ FILE_SIZE_TARGETS: dict[str, int] = {
     "1gb":   1024 * 1024 * 1024,
 }
 
-# Approximate bytes per row in compressed Parquet (empirical estimate)
-_BYTES_PER_ROW_PARQUET = 80
+# Approximate bytes per row in compressed Parquet (empirical: unified schema is ~7 bytes/row
+# for the 8-column long-form robotics schema with snappy compression)
+_BYTES_PER_ROW_PARQUET = 7
 
 
 # ── Download helpers ──────────────────────────────────────────────────────────
@@ -47,9 +48,17 @@ def _download_dataset(
     n_episodes: int,
     cache_dir: Path,
 ) -> Path:
-    """Download Parquet files from HuggingFace Hub, return local path."""
+    """
+    Download only the first n_episodes Parquet files from a HuggingFace dataset repo.
+
+    Lists remote files first, selects up to n_episodes episode Parquets, then
+    downloads each individually with hf_hub_download. This avoids pulling the
+    entire repo (which can be 30GB+ for large datasets like behavior1k).
+
+    Falls back to snapshot_download if listing fails.
+    """
     try:
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import hf_hub_download, list_repo_files
     except ImportError:
         raise RuntimeError(
             "huggingface_hub not installed. Run: pip install huggingface_hub"
@@ -58,9 +67,64 @@ def _download_dataset(
     local_dir = cache_dir / dataset_name / "raw"
     local_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"  Downloading {dataset_name} from {hf_repo_id}...")
-    print(f"  (targeting first ~{n_episodes} episodes, Parquet only)")
+    # Check for already-downloaded files (resume)
+    existing = list(local_dir.rglob("*.parquet"))
+    if len(existing) >= n_episodes:
+        print(f"  Using {len(existing)} cached Parquet file(s) in {local_dir}")
+        return local_dir
 
+    print(f"  Listing files in {hf_repo_id}...")
+
+    try:
+        all_files = list(list_repo_files(hf_repo_id, repo_type="dataset"))
+    except Exception as e:
+        print(f"  WARNING: Could not list repo files ({e}), falling back to snapshot_download")
+        _snapshot_fallback(hf_repo_id, local_dir)
+        parquet_files = list(local_dir.rglob("*.parquet"))
+        if not parquet_files:
+            raise RuntimeError(f"No Parquet files found in {local_dir} after download.")
+        print(f"  Found {len(parquet_files)} Parquet file(s)")
+        return local_dir
+
+    # Filter to data Parquet files only (skip metadata / README)
+    parquet_remote = sorted(
+        f for f in all_files
+        if f.endswith(".parquet") and not f.startswith("README")
+    )
+    print(f"  Repo has {len(parquet_remote)} Parquet files; downloading first {n_episodes}")
+
+    # Skip already downloaded
+    already_done = {p.name for p in existing}
+    to_download = [
+        f for f in parquet_remote
+        if Path(f).name not in already_done
+    ][:max(0, n_episodes - len(existing))]
+
+    for i, remote_path in enumerate(to_download, 1):
+        local_target = local_dir / Path(remote_path).name
+        if local_target.exists():
+            continue
+        print(f"  [{i}/{len(to_download)}] {Path(remote_path).name}", end="\r", flush=True)
+        hf_hub_download(
+            repo_id=hf_repo_id,
+            repo_type="dataset",
+            filename=remote_path,
+            local_dir=str(local_dir),
+        )
+
+    if to_download:
+        print()  # newline after \r progress
+
+    parquet_files = list(local_dir.rglob("*.parquet"))
+    if not parquet_files:
+        raise RuntimeError(f"No Parquet files found in {local_dir} after download.")
+    print(f"  Downloaded {len(parquet_files)} Parquet file(s) → {local_dir}")
+    return local_dir
+
+
+def _snapshot_fallback(hf_repo_id: str, local_dir: Path) -> None:
+    """Fallback: snapshot_download filtering to Parquet/JSON only."""
+    from huggingface_hub import snapshot_download
     try:
         snapshot_download(
             repo_id=hf_repo_id,
@@ -70,19 +134,7 @@ def _download_dataset(
             ignore_patterns=["*.mp4", "*.avi", "*.mov", "*.jpg", "*.png"],
         )
     except Exception as e:
-        print(f"  WARNING: Download failed or partial: {e}")
-        print(f"  Checking for existing files in {local_dir}...")
-
-    parquet_files = list(local_dir.rglob("*.parquet"))
-    if not parquet_files:
-        raise RuntimeError(
-            f"No Parquet files found in {local_dir}. "
-            f"Download may have failed for {hf_repo_id}.\n"
-            f"Check the HF repo ID and your network/auth."
-        )
-
-    print(f"  Found {len(parquet_files)} Parquet file(s)")
-    return local_dir
+        print(f"  WARNING: snapshot_download failed or partial: {e}")
 
 
 def _read_and_subsample(raw_dir: Path, n_episodes: int) -> pl.DataFrame:
@@ -135,22 +187,54 @@ def _write_filesize_partition(
     """
     Write Parquet files sized to approximately target_bytes each.
 
-    Adjusts number of row groups so each file ≈ target_bytes.
-    Actual file sizes are verified; if off by >50%, logs a warning.
+    If the normalized dataset is smaller than target_bytes, the data is
+    replicated (with a unique _copy_id suffix on episode_id) until enough
+    rows are available — this is the "looping / multiplier" strategy that
+    lets us benchmark with arbitrary sizes using real-world data patterns.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    total_rows = len(df)
 
-    # Estimate rows per partition
-    rows_per_file = max(1000, target_bytes // _BYTES_PER_ROW_PARQUET)
+    # Measure the actual per-row byte cost on this dataset
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+        tmp_path = tmp.name
+    df.slice(0, min(10_000, len(df))).write_parquet(tmp_path, compression="snappy")
+    sample_bytes = os.path.getsize(tmp_path)
+    sample_rows = min(10_000, len(df))
+    os.unlink(tmp_path)
+    bytes_per_row = max(1, sample_bytes / sample_rows)
+
+    rows_per_file = max(1000, int(target_bytes / bytes_per_row))
+    total_rows_needed = rows_per_file  # at least one full file
+
+    # Replicate if needed (looping / scale-up strategy)
+    working_df = df
+    if len(df) < total_rows_needed:
+        copies_needed = math.ceil(total_rows_needed / len(df))
+        replicas = []
+        for c in range(copies_needed):
+            replica = df.with_columns(
+                (pl.col("episode_id") + f"_c{c}").alias("episode_id")
+            )
+            replicas.append(replica)
+        working_df = pl.concat(replicas, how="diagonal_relaxed")
+
+    total_rows = len(working_df)
     n_partitions = max(1, math.ceil(total_rows / rows_per_file))
 
-    print(f"    Writing {size_label}: ~{rows_per_file:,} rows/file, {n_partitions} file(s)...")
+    print(
+        f"    Writing {size_label}: ~{rows_per_file:,} rows/file, "
+        f"{n_partitions} file(s)  ({bytes_per_row:.1f} bytes/row empirical)"
+    )
+
+    # Clear old files
+    for old in out_dir.glob("*.parquet"):
+        old.unlink()
 
     for i in range(n_partitions):
         start = i * rows_per_file
         end = min((i + 1) * rows_per_file, total_rows)
-        chunk = df.slice(start, end - start)
+        chunk = working_df.slice(start, end - start)
         out_file = out_dir / f"part_{i:04d}.parquet"
         chunk.write_parquet(str(out_file), compression="snappy")
 
@@ -159,19 +243,12 @@ def _write_filesize_partition(
     if written_files:
         actual_sizes = [f.stat().st_size for f in written_files]
         avg_actual = sum(actual_sizes) / len(actual_sizes)
-        ratio = avg_actual / target_bytes
-        if ratio < 0.3 or ratio > 3.0:
-            print(
-                f"    WARNING: actual avg file size {avg_actual/1024:.0f} KB, "
-                f"target {target_bytes/1024:.0f} KB (ratio {ratio:.1f}×). "
-                "Consider adjusting _BYTES_PER_ROW_PARQUET."
-            )
-        else:
-            print(
-                f"    OK: {len(written_files)} file(s), "
-                f"avg {avg_actual/1024:.0f} KB/file "
-                f"(target {target_bytes/1024:.0f} KB)"
-            )
+        total_actual = sum(actual_sizes)
+        print(
+            f"    OK: {len(written_files)} file(s), "
+            f"avg {avg_actual/1024:.0f} KB/file, "
+            f"total {total_actual/1024/1024:.1f} MB"
+        )
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────

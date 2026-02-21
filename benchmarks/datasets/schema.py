@@ -91,84 +91,66 @@ def normalize_behavior1k(raw_df: pl.DataFrame) -> pl.DataFrame:
     """
     Normalize BEHAVIOR-1K dataset to unified schema.
 
-    Raw columns: episode_index, timestamp, observation.state (23-dim list),
-                 task_index (or task_name)
+    Raw columns: episode_index (int), index (frame), timestamp (float),
+                 task_index (int), observation.state (list[f64] 23-dim),
+                 observation.cam_rel_poses, action, observation.task_info
+
+    Strategy: extract observation.state[0] as signal_value (one row per frame,
+    no list explosion) to avoid O(dims) memory amplification.
+    200 episodes × ~2k frames = ~400k rows in unified schema.
     """
     df = raw_df.clone()
 
-    # Rename episode key
-    if "episode_index" in df.columns:
-        df = df.rename({"episode_index": "episode_id"})
+    # episode_id
+    ep_col = next((c for c in ["episode_index", "episode_id"] if c in df.columns), None)
+    if ep_col and ep_col != "episode_id":
+        df = df.rename({ep_col: "episode_id"})
     df = df.with_columns(pl.col("episode_id").cast(pl.Utf8))
 
-    # frame_index: use existing or generate from row number within episode
+    # frame_index — use "index" column if present, else row-number within episode
     if "frame_index" not in df.columns:
-        df = df.with_columns(
-            pl.int_range(pl.len()).over("episode_id").cast(pl.Int64).alias("frame_index")
-        )
-
-    # timestamp: should exist; cast to float seconds
-    if "timestamp" not in df.columns:
-        # derive from frame_index assuming 30 FPS
-        df = df.with_columns(
-            (pl.col("frame_index") / 30.0).alias("timestamp")
-        )
-
-    # task_id
-    task_col = next((c for c in ["task_index", "task_name", "task_id"] if c in df.columns), None)
-    if task_col:
-        df = df.with_columns(pl.col(task_col).cast(pl.Utf8).alias("task_id"))
-    else:
-        df = df.with_columns(pl.lit("unknown").alias("task_id"))
-
-    # Explode observation.state (23-dim)
-    state_col = next((c for c in ["observation.state", "obs_state", "state"] if c in df.columns), None)
-    if state_col:
-        df = df.with_columns(pl.col(state_col).alias("episode_id"))  # placeholder
-        # Re-attach episode_id properly
-        df = df.drop(state_col)
-
-    # If state column is a list, explode; otherwise use signal_value directly
-    obs_cols = [c for c in raw_df.columns if "state" in c.lower() or "action" in c.lower()]
-    list_cols = [c for c in obs_cols if raw_df[c].dtype == pl.List(pl.Float64)
-                 or raw_df[c].dtype == pl.List(pl.Float32)
-                 or str(raw_df[c].dtype).startswith("List")]
-
-    if list_cols:
-        # Rebuild from raw_df
-        df = raw_df.clone()
-        if "episode_index" in df.columns:
-            df = df.rename({"episode_index": "episode_id"})
-        df = df.with_columns(pl.col("episode_id").cast(pl.Utf8))
-        if "frame_index" not in df.columns:
+        if "index" in df.columns:
+            df = df.rename({"index": "frame_index"})
+        else:
             df = df.with_columns(
                 pl.int_range(pl.len()).over("episode_id").cast(pl.Int64).alias("frame_index")
             )
-        if "timestamp" not in df.columns:
-            df = df.with_columns((pl.col("frame_index") / 30.0).alias("timestamp"))
-        if task_col:
-            df = df.with_columns(pl.col(task_col).cast(pl.Utf8).alias("task_id"))
-        else:
-            df = df.with_columns(pl.lit("unknown").alias("task_id"))
+    df = df.with_columns(pl.col("frame_index").cast(pl.Int64))
 
-        prefix_map = {}
-        for c in list_cols:
-            if "action" in c.lower():
-                prefix_map[c] = "action"
-            else:
-                prefix_map[c] = "state"
+    # timestamp
+    if "timestamp" not in df.columns:
+        df = df.with_columns((pl.col("frame_index").cast(pl.Float64) / 30.0).alias("timestamp"))
 
-        df = _explode_vector_columns(df, list_cols, prefix_map)
+    # task_id
+    task_col = next((c for c in ["task_index", "task_name", "task_id"] if c in df.columns), None)
+    df = df.with_columns(
+        pl.col(task_col).cast(pl.Utf8).alias("task_id") if task_col
+        else pl.lit("unknown").alias("task_id")
+    )
+
+    # signal_value: extract element [0] from observation.state list (no explosion)
+    state_col = next(
+        (c for c in ["observation.state", "obs_state", "state"] if c in df.columns), None
+    )
+    if state_col and str(df[state_col].dtype).startswith("List"):
+        df = df.with_columns(
+            pl.col(state_col).list.get(0).cast(pl.Float64).alias("signal_value"),
+            pl.lit(0).cast(pl.Int32).alias("dim_index"),
+            pl.lit("state_0").alias("dim_name"),
+        )
     else:
-        # Scalar signal_value already present or use first numeric column
-        numeric_cols = [c for c in df.columns if df[c].dtype in (pl.Float32, pl.Float64, pl.Int32, pl.Int64)]
-        val_col = next((c for c in numeric_cols if c not in UNIFIED_COLUMNS), None)
-        if val_col:
-            df = df.with_columns(
-                pl.col(val_col).cast(pl.Float64).alias("signal_value"),
-                pl.lit(0).cast(pl.Int32).alias("dim_index"),
-                pl.lit("state_0").alias("dim_name"),
-            )
+        # Fallback: use first available numeric column
+        numeric_col = next(
+            (c for c in df.columns if df[c].dtype in (pl.Float32, pl.Float64)
+             and c not in UNIFIED_COLUMNS),
+            None,
+        )
+        val = pl.col(numeric_col).cast(pl.Float64) if numeric_col else pl.lit(0.0)
+        df = df.with_columns(
+            val.alias("signal_value"),
+            pl.lit(0).cast(pl.Int32).alias("dim_index"),
+            pl.lit("state_0").alias("dim_name"),
+        )
 
     df = df.with_columns(pl.lit("behavior1k").alias("dataset"))
     return _ensure_columns(df, "behavior1k")
@@ -176,11 +158,11 @@ def normalize_behavior1k(raw_df: pl.DataFrame) -> pl.DataFrame:
 
 def normalize_droid(raw_df: pl.DataFrame) -> pl.DataFrame:
     """
-    Normalize DROID / RoboInter dataset to unified schema.
+    Normalize DROID (lerobot/droid) dataset to unified schema.
 
-    Raw columns: episode_id (or episode_index), frame_index,
-                 state/action vectors (list columns), language_instruction
-    Timestamp reconstructed from frame_index × 0.033s (30 FPS).
+    Raw columns: episode_index, frame_index, timestamp,
+                 observation.state (list), action (list), language_instruction
+    Strategy: extract list[0] as signal_value — no explosion.
     """
     df = raw_df.clone()
 
@@ -189,41 +171,50 @@ def normalize_droid(raw_df: pl.DataFrame) -> pl.DataFrame:
     df = df.with_columns(pl.col("episode_id").cast(pl.Utf8))
 
     if "frame_index" not in df.columns:
+        if "index" in df.columns:
+            df = df.rename({"index": "frame_index"})
+        else:
+            df = df.with_columns(
+                pl.int_range(pl.len()).over("episode_id").cast(pl.Int64).alias("frame_index")
+            )
+    df = df.with_columns(pl.col("frame_index").cast(pl.Int64))
+
+    if "timestamp" not in df.columns:
         df = df.with_columns(
-            pl.int_range(pl.len()).over("episode_id").cast(pl.Int64).alias("frame_index")
+            (pl.col("frame_index").cast(pl.Float64) / 30.0).alias("timestamp")
         )
 
-    # Reconstruct timestamp from frame_index (30 FPS)
-    df = df.with_columns(
-        (pl.col("frame_index").cast(pl.Float64) * (1.0 / 30.0)).alias("timestamp")
-    )
-
-    # task_id from language instruction
     lang_col = next(
         (c for c in ["language_instruction", "task_id", "task_name", "task"] if c in df.columns),
         None,
     )
-    if lang_col:
-        df = df.with_columns(pl.col(lang_col).cast(pl.Utf8).alias("task_id"))
-    else:
-        df = df.with_columns(pl.lit("unknown").alias("task_id"))
+    df = df.with_columns(
+        pl.col(lang_col).cast(pl.Utf8).alias("task_id") if lang_col
+        else pl.lit("unknown").alias("task_id")
+    )
 
-    list_cols = [
-        c for c in df.columns
-        if str(df[c].dtype).startswith("List") and c not in UNIFIED_COLUMNS
-    ]
-    if list_cols:
-        prefix_map = {c: ("action" if "action" in c.lower() else "state") for c in list_cols}
-        df = _explode_vector_columns(df, list_cols, prefix_map)
+    # Extract first element of first available list column as signal_value
+    list_col = next(
+        (c for c in df.columns if str(df[c].dtype).startswith("List") and c not in UNIFIED_COLUMNS),
+        None,
+    )
+    if list_col:
+        df = df.with_columns(
+            pl.col(list_col).list.get(0).cast(pl.Float64).alias("signal_value"),
+            pl.lit(0).cast(pl.Int32).alias("dim_index"),
+            pl.lit("state_0").alias("dim_name"),
+        )
     else:
-        numeric_cols = [c for c in df.columns if df[c].dtype in (pl.Float32, pl.Float64)]
-        val_col = next((c for c in numeric_cols if c not in UNIFIED_COLUMNS), None)
-        if val_col:
-            df = df.with_columns(
-                pl.col(val_col).cast(pl.Float64).alias("signal_value"),
-                pl.lit(0).cast(pl.Int32).alias("dim_index"),
-                pl.lit("state_0").alias("dim_name"),
-            )
+        numeric_col = next(
+            (c for c in df.columns if df[c].dtype in (pl.Float32, pl.Float64)
+             and c not in UNIFIED_COLUMNS), None
+        )
+        val = pl.col(numeric_col).cast(pl.Float64) if numeric_col else pl.lit(0.0)
+        df = df.with_columns(
+            val.alias("signal_value"),
+            pl.lit(0).cast(pl.Int32).alias("dim_index"),
+            pl.lit("state_0").alias("dim_name"),
+        )
 
     df = df.with_columns(pl.lit("droid").alias("dataset"))
     return _ensure_columns(df, "droid")
@@ -231,9 +222,11 @@ def normalize_droid(raw_df: pl.DataFrame) -> pl.DataFrame:
 
 def normalize_oxe(raw_df: pl.DataFrame) -> pl.DataFrame:
     """
-    Normalize Open X-Embodiment dataset to unified schema.
+    Normalize Open X-Embodiment (lerobot/fractal20220817_data) to unified schema.
 
-    Raw columns: episode_id, timestamp (exists natively), state (list), action (list)
+    Raw columns: episode_index, frame_index, timestamp, observation.state (list),
+                 action (list), language_instruction (optional)
+    Strategy: extract list[0] as signal_value — no explosion.
     """
     df = raw_df.clone()
 
@@ -242,11 +235,14 @@ def normalize_oxe(raw_df: pl.DataFrame) -> pl.DataFrame:
     df = df.with_columns(pl.col("episode_id").cast(pl.Utf8))
 
     if "frame_index" not in df.columns:
-        df = df.with_columns(
-            pl.int_range(pl.len()).over("episode_id").cast(pl.Int64).alias("frame_index")
-        )
+        if "index" in df.columns:
+            df = df.rename({"index": "frame_index"})
+        else:
+            df = df.with_columns(
+                pl.int_range(pl.len()).over("episode_id").cast(pl.Int64).alias("frame_index")
+            )
+    df = df.with_columns(pl.col("frame_index").cast(pl.Int64))
 
-    # timestamp exists natively in OXE
     if "timestamp" not in df.columns:
         df = df.with_columns(
             (pl.col("frame_index").cast(pl.Float64) / 30.0).alias("timestamp")
@@ -256,27 +252,32 @@ def normalize_oxe(raw_df: pl.DataFrame) -> pl.DataFrame:
         (c for c in ["task_id", "task_name", "language_instruction", "task"] if c in df.columns),
         None,
     )
-    if task_col:
-        df = df.with_columns(pl.col(task_col).cast(pl.Utf8).alias("task_id"))
-    else:
-        df = df.with_columns(pl.lit("unknown").alias("task_id"))
+    df = df.with_columns(
+        pl.col(task_col).cast(pl.Utf8).alias("task_id") if task_col
+        else pl.lit("unknown").alias("task_id")
+    )
 
-    list_cols = [
-        c for c in df.columns
-        if str(df[c].dtype).startswith("List") and c not in UNIFIED_COLUMNS
-    ]
-    if list_cols:
-        prefix_map = {c: ("action" if "action" in c.lower() else "state") for c in list_cols}
-        df = _explode_vector_columns(df, list_cols, prefix_map)
+    list_col = next(
+        (c for c in df.columns if str(df[c].dtype).startswith("List") and c not in UNIFIED_COLUMNS),
+        None,
+    )
+    if list_col:
+        df = df.with_columns(
+            pl.col(list_col).list.get(0).cast(pl.Float64).alias("signal_value"),
+            pl.lit(0).cast(pl.Int32).alias("dim_index"),
+            pl.lit("state_0").alias("dim_name"),
+        )
     else:
-        numeric_cols = [c for c in df.columns if df[c].dtype in (pl.Float32, pl.Float64)]
-        val_col = next((c for c in numeric_cols if c not in UNIFIED_COLUMNS), None)
-        if val_col:
-            df = df.with_columns(
-                pl.col(val_col).cast(pl.Float64).alias("signal_value"),
-                pl.lit(0).cast(pl.Int32).alias("dim_index"),
-                pl.lit("state_0").alias("dim_name"),
-            )
+        numeric_col = next(
+            (c for c in df.columns if df[c].dtype in (pl.Float32, pl.Float64)
+             and c not in UNIFIED_COLUMNS), None
+        )
+        val = pl.col(numeric_col).cast(pl.Float64) if numeric_col else pl.lit(0.0)
+        df = df.with_columns(
+            val.alias("signal_value"),
+            pl.lit(0).cast(pl.Int32).alias("dim_index"),
+            pl.lit("state_0").alias("dim_name"),
+        )
 
     df = df.with_columns(pl.lit("oxe").alias("dataset"))
     return _ensure_columns(df, "oxe")
@@ -286,7 +287,9 @@ def normalize_nvidia_physicalai(raw_df: pl.DataFrame) -> pl.DataFrame:
     """
     Normalize NVIDIA Physical AI dataset to unified schema.
 
-    Raw columns: episode_index, timestamp, observation.state (53-dim list)
+    Raw columns: episode_index, timestamp, observation.state (53-dim list),
+                 action (list), task_index (optional)
+    Strategy: extract list[0] as signal_value — no explosion.
     """
     df = raw_df.clone()
 
@@ -295,9 +298,13 @@ def normalize_nvidia_physicalai(raw_df: pl.DataFrame) -> pl.DataFrame:
     df = df.with_columns(pl.col("episode_id").cast(pl.Utf8))
 
     if "frame_index" not in df.columns:
-        df = df.with_columns(
-            pl.int_range(pl.len()).over("episode_id").cast(pl.Int64).alias("frame_index")
-        )
+        if "index" in df.columns:
+            df = df.rename({"index": "frame_index"})
+        else:
+            df = df.with_columns(
+                pl.int_range(pl.len()).over("episode_id").cast(pl.Int64).alias("frame_index")
+            )
+    df = df.with_columns(pl.col("frame_index").cast(pl.Int64))
 
     if "timestamp" not in df.columns:
         df = df.with_columns(
@@ -307,27 +314,32 @@ def normalize_nvidia_physicalai(raw_df: pl.DataFrame) -> pl.DataFrame:
     task_col = next(
         (c for c in ["task_index", "task_id", "task_name"] if c in df.columns), None
     )
-    if task_col:
-        df = df.with_columns(pl.col(task_col).cast(pl.Utf8).alias("task_id"))
-    else:
-        df = df.with_columns(pl.lit("unknown").alias("task_id"))
+    df = df.with_columns(
+        pl.col(task_col).cast(pl.Utf8).alias("task_id") if task_col
+        else pl.lit("unknown").alias("task_id")
+    )
 
-    list_cols = [
-        c for c in df.columns
-        if str(df[c].dtype).startswith("List") and c not in UNIFIED_COLUMNS
-    ]
-    if list_cols:
-        prefix_map = {c: ("action" if "action" in c.lower() else "state") for c in list_cols}
-        df = _explode_vector_columns(df, list_cols, prefix_map)
+    list_col = next(
+        (c for c in df.columns if str(df[c].dtype).startswith("List") and c not in UNIFIED_COLUMNS),
+        None,
+    )
+    if list_col:
+        df = df.with_columns(
+            pl.col(list_col).list.get(0).cast(pl.Float64).alias("signal_value"),
+            pl.lit(0).cast(pl.Int32).alias("dim_index"),
+            pl.lit("state_0").alias("dim_name"),
+        )
     else:
-        numeric_cols = [c for c in df.columns if df[c].dtype in (pl.Float32, pl.Float64)]
-        val_col = next((c for c in numeric_cols if c not in UNIFIED_COLUMNS), None)
-        if val_col:
-            df = df.with_columns(
-                pl.col(val_col).cast(pl.Float64).alias("signal_value"),
-                pl.lit(0).cast(pl.Int32).alias("dim_index"),
-                pl.lit("state_0").alias("dim_name"),
-            )
+        numeric_col = next(
+            (c for c in df.columns if df[c].dtype in (pl.Float32, pl.Float64)
+             and c not in UNIFIED_COLUMNS), None
+        )
+        val = pl.col(numeric_col).cast(pl.Float64) if numeric_col else pl.lit(0.0)
+        df = df.with_columns(
+            val.alias("signal_value"),
+            pl.lit(0).cast(pl.Int32).alias("dim_index"),
+            pl.lit("state_0").alias("dim_name"),
+        )
 
     df = df.with_columns(pl.lit("nvidia_physicalai").alias("dataset"))
     return _ensure_columns(df, "nvidia_physicalai")
