@@ -176,6 +176,7 @@ def make_task(
         name=f"bench-{task_id.replace('_', '-').replace('--', '-')}",
         namespace=NAMESPACE,
         image=image,
+        image_pull_policy="Always",
         arguments=cmd_args,
         env_vars=_env_vars(),
         container_resources=resources,
@@ -207,6 +208,7 @@ def make_collect_task(dag: DAG, run_id: str) -> KubernetesPodOperator:
         name="bench-collect-results",
         namespace=NAMESPACE,
         image=CPU_IMAGE,
+        image_pull_policy="Always",
         cmds=["python3"],
         arguments=[
             "/app/benchmarks/collect_results_s3.py",
