@@ -1,0 +1,120 @@
+# setup/helm_values/airflow-values.yaml
+#
+# Airflow 2.x with KubernetesExecutor.
+# DAGs synced from GitHub (dev branch, airflow/dags/ subPath).
+
+# ── Executor ──────────────────────────────────────────────────────────────────
+executor: KubernetesExecutor
+
+# ── Images ───────────────────────────────────────────────────────────────────
+images:
+  airflow:
+    repository: apache/airflow
+    tag: "2.9.2"
+    pullPolicy: IfNotPresent
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+scheduler:
+  resources:
+    requests:
+      cpu: "1000m"
+      memory: 2Gi
+    limits:
+      cpu: "1000m"
+      memory: 2Gi
+
+webserver:
+  resources:
+    requests:
+      cpu: "500m"
+      memory: 1Gi
+    limits:
+      cpu: "1000m"
+      memory: 2Gi
+  service:
+    type: ClusterIP
+    port: 8080
+
+# ── Database (bundled PostgreSQL) ─────────────────────────────────────────────
+postgresql:
+  enabled: true
+  auth:
+    username: airflow
+    password: airflow
+    database: airflow
+
+# ── Git-sync DAGs from GitHub ─────────────────────────────────────────────────
+dags:
+  gitSync:
+    enabled: true
+    repo: https://github.com/shubhstiws-new/hsm-pyspark.git
+    branch: dev
+    rev: HEAD
+    depth: 1
+    maxFailures: 3
+    subPath: "airflow/dags"
+    wait: 60
+    containerName: git-sync
+    uid: 65533
+
+# ── KubernetesExecutor pod template ──────────────────────────────────────────
+# Default resource limits for worker pods (overridden per-task via pod_override)
+workers:
+  resources:
+    requests:
+      cpu: "1000m"
+      memory: 1Gi
+    limits:
+      cpu: "1000m"
+      memory: 1Gi
+
+# ── Config overrides ──────────────────────────────────────────────────────────
+config:
+  core:
+    parallelism: "16"
+    max_active_tasks_per_dag: "16"
+    max_active_runs_per_dag: "2"
+    load_examples: "False"
+  kubernetes_executor:
+    namespace: "hsm-bench"
+    worker_container_repository: apache/airflow
+    worker_container_tag: "2.9.2"
+    delete_worker_pods: "True"
+    delete_worker_pods_on_failure: "False"
+    worker_pods_creation_batch_size: "16"
+  logging:
+    logging_level: WARNING
+
+# ── Airflow environment (passed to all pods) ──────────────────────────────────
+env:
+  - name: AWS_ENDPOINT_URL
+    value: "http://minio.hsm-bench.svc:9000"
+  - name: AWS_ACCESS_KEY_ID
+    value: "minioadmin"
+  - name: AWS_SECRET_ACCESS_KEY
+    value: "minioadmin"
+  - name: AWS_DEFAULT_REGION
+    value: "us-east-1"
+
+# ── Default credentials ───────────────────────────────────────────────────────
+webserverSecretKey: "hsm-bench-secret-key-change-in-prod"
+
+# Admin user created on first deploy
+createUserJob:
+  useHelmHooks: false
+
+extraEnv: |
+  - name: _AIRFLOW_WWW_USER_CREATE
+    value: "True"
+  - name: _AIRFLOW_WWW_USER_USERNAME
+    value: admin
+  - name: _AIRFLOW_WWW_USER_PASSWORD
+    value: admin
+  - name: _AIRFLOW_WWW_USER_EMAIL
+    value: admin@hsm-bench.local
+  - name: _AIRFLOW_WWW_USER_FIRSTNAME
+    value: Admin
+  - name: _AIRFLOW_WWW_USER_LASTNAME
+    value: User
+  - name: _AIRFLOW_WWW_USER_ROLE
+    value: Admin

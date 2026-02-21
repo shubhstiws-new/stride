@@ -271,15 +271,35 @@ def _run_pyspark(data_path: str, hardware_cfg: dict) -> tuple[int, float, float,
     proc = psutil.Process()
     mem_before = proc.memory_info().rss
     spark_cfg = hardware_cfg.get("spark_config", {})
+    master = spark_cfg.get("master", "local[*]")
+    is_k8s = master.startswith("k8s://")
 
     builder = (
         SparkSession.builder
         .appName("matrix-window-hsm")
-        .master(spark_cfg.get("master", "local[*]"))
+        .master(master)
         .config("spark.driver.memory", spark_cfg.get("driver_memory", "8g"))
         .config("spark.sql.shuffle.partitions", str(spark_cfg.get("shuffle_partitions", 8)))
         .config("spark.ui.showConsoleProgress", "false")
     )
+
+    # k8s-specific executor config (KubernetesPodOperator pod IS the driver)
+    if is_k8s:
+        executor_instances = spark_cfg.get("executor_instances", 4)
+        executor_image = spark_cfg.get("executor_image", "")
+        k8s_namespace = spark_cfg.get("kubernetes_namespace", "hsm-bench")
+        k8s_sa = spark_cfg.get("kubernetes_service_account", "spark")
+        builder = (
+            builder
+            .config("spark.executor.instances", str(executor_instances))
+            .config("spark.executor.cores", str(spark_cfg.get("executor_cores", 1)))
+            .config("spark.executor.memory", spark_cfg.get("executor_memory", "1g"))
+            .config("spark.kubernetes.namespace", k8s_namespace)
+            .config("spark.kubernetes.authenticate.serviceAccountName", k8s_sa)
+            .config("spark.kubernetes.authenticate.driver.serviceAccountName", k8s_sa)
+        )
+        if executor_image:
+            builder = builder.config("spark.kubernetes.container.image", executor_image)
 
     # S3A / MinIO config for Spark
     if data_path.startswith("s3a://"):
@@ -345,11 +365,17 @@ def _run_pyspark_rapids(data_path: str, hardware_cfg: dict) -> tuple[int, float,
     proc = psutil.Process()
     mem_before = proc.memory_info().rss
     spark_cfg = hardware_cfg.get("spark_config", {})
+    master = spark_cfg.get("master", "local[*]")
+    is_k8s = master.startswith("k8s://")
 
-    spark = (
+    # On k8s the JAR lives on a hostPath mount; reference as local:/// so Spark
+    # doesn't try to distribute it via HDFS/S3 (executors already have the mount).
+    jar_ref = f"local://{rapids_jar}" if is_k8s else rapids_jar
+
+    builder = (
         SparkSession.builder
         .appName("matrix-window-hsm-rapids")
-        .master(spark_cfg.get("master", "local[*]"))
+        .master(master)
         .config("spark.driver.memory", spark_cfg.get("driver_memory", "16g"))
         .config("spark.plugins", "com.nvidia.spark.SQLPlugin")
         .config("spark.rapids.sql.enabled", "true")
@@ -357,10 +383,32 @@ def _run_pyspark_rapids(data_path: str, hardware_cfg: dict) -> tuple[int, float,
         .config("spark.task.resource.gpu.amount", "1")
         .config("spark.rapids.memory.gpu.maxAllocFraction", "0.8")
         .config("spark.rapids.sql.concurrentGpuTasks", "2")
-        .config("spark.jars", rapids_jar)
+        .config("spark.jars", jar_ref)
         .config("spark.ui.showConsoleProgress", "false")
-        .getOrCreate()
     )
+
+    if is_k8s:
+        executor_instances = spark_cfg.get("executor_instances", 2)
+        executor_image = spark_cfg.get("executor_image", "")
+        k8s_namespace = spark_cfg.get("kubernetes_namespace", "hsm-bench")
+        k8s_sa = spark_cfg.get("kubernetes_service_account", "spark")
+        builder = (
+            builder
+            .config("spark.executor.instances", str(executor_instances))
+            .config("spark.executor.cores", str(spark_cfg.get("executor_cores", 1)))
+            .config("spark.executor.memory", spark_cfg.get("executor_memory", "1g"))
+            .config("spark.kubernetes.namespace", k8s_namespace)
+            .config("spark.kubernetes.authenticate.serviceAccountName", k8s_sa)
+            .config("spark.kubernetes.authenticate.driver.serviceAccountName", k8s_sa)
+            # Mount /opt/rapids on executor pods (same hostPath as driver)
+            .config("spark.kubernetes.executor.volumes.hostPath.rapids-jar.mount.path", "/opt/rapids")
+            .config("spark.kubernetes.executor.volumes.hostPath.rapids-jar.options.path", "/opt/rapids")
+            .config("spark.kubernetes.executor.volumes.hostPath.rapids-jar.mount.readOnly", "true")
+        )
+        if executor_image:
+            builder = builder.config("spark.kubernetes.container.image", executor_image)
+
+    spark = builder.getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
 
     t0 = time.perf_counter()

@@ -1,0 +1,32 @@
+# docker/benchmark-worker/Dockerfile.gpu
+#
+# GPU benchmark worker image for cuDF standalone.
+# Based on rapidsai/base:25.12-cuda12-py3.11 (cuDF pre-installed, CUDA 12).
+#
+# Build:
+#   docker build -f docker/benchmark-worker/Dockerfile.gpu \
+#       -t <hub>/hsm-bench-worker-gpu:latest docker/benchmark-worker/
+# Push:
+#   docker push <hub>/hsm-bench-worker-gpu:latest
+
+FROM rapidsai/base:25.12-cuda12.5-py3.11
+
+USER root
+
+# Python deps for S3 access and benchmarking utilities
+RUN pip install --no-cache-dir \
+    pyarrow \
+    boto3 \
+    s3fs \
+    psutil \
+    pynvml \
+    huggingface_hub
+
+# Copy repo into /app
+COPY . /app
+WORKDIR /app
+
+# Install hsm-pyspark package (cuDF image has no Spark; no-deps install)
+RUN pip install --no-cache-dir --no-deps -e .
+
+ENTRYPOINT ["python3", "/app/benchmarks/run_single.py"]

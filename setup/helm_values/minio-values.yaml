@@ -1,0 +1,59 @@
+# setup/helm_values/minio-values.yaml
+#
+# Single-node MinIO deployment for hsm-bench namespace.
+# 50 GB PVC, auto-creates robotics-bench bucket on first boot.
+
+mode: standalone
+
+replicas: 1
+
+rootUser: minioadmin
+rootPassword: minioadmin
+
+resources:
+  requests:
+    memory: 1Gi
+    cpu: "500m"
+  limits:
+    memory: 2Gi
+    cpu: "1000m"
+
+persistence:
+  enabled: true
+  size: 50Gi
+  storageClass: ""   # use cluster default (local-path in k3s)
+
+# Auto-create bucket on startup
+buckets:
+  - name: robotics-bench
+    policy: none
+    purge: false
+    versioning: false
+    objectlocking: false
+
+# Service: ClusterIP (reachable inside cluster as minio.hsm-bench.svc:9000)
+service:
+  type: ClusterIP
+  port: 9000
+
+consoleService:
+  type: ClusterIP
+  port: 9001
+
+# Allow Spark S3A and all Python frameworks to connect
+# (no TLS inside the cluster — matches Spark .connection.ssl.enabled=false)
+tls:
+  enabled: false
+
+# Environment variable that disables cert verification for internal clients
+environment:
+  MINIO_SITE_NAME: "hsm-bench-minio"
+
+# Liveness / readiness probes
+livenessProbe:
+  initialDelaySeconds: 30
+  periodSeconds: 30
+
+readinessProbe:
+  initialDelaySeconds: 10
+  periodSeconds: 10

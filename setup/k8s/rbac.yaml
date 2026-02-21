@@ -1,0 +1,48 @@
+# setup/k8s/rbac.yaml
+#
+# ServiceAccount + ClusterRoleBinding for Spark-on-k8s (native k8s scheduler).
+# The Airflow task pod (Spark driver) needs permission to create/delete/watch
+# executor pods in the hsm-bench namespace.
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark
+  namespace: hsm-bench
+  labels:
+    app.kubernetes.io/component: spark-driver
+    app.kubernetes.io/managed-by: hsm-pyspark
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hsm-bench-spark
+  labels:
+    app.kubernetes.io/managed-by: hsm-pyspark
+rules:
+  # Spark driver needs full CRUD on pods + services within the namespace
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/status", "services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Needed for driver → executor communication
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hsm-bench-spark
+  labels:
+    app.kubernetes.io/managed-by: hsm-pyspark
+subjects:
+  - kind: ServiceAccount
+    name: spark
+    namespace: hsm-bench
+roleRef:
+  kind: ClusterRole
+  name: hsm-bench-spark
+  apiGroup: rbac.authorization.k8s.io
