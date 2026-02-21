@@ -68,10 +68,9 @@ def _download_dataset(
     local_dir.mkdir(parents=True, exist_ok=True)
 
     # Check for already-downloaded files (resume)
+    # Note: for chunk repos we may have far fewer files than n_episodes — that's fine,
+    # actual episode subsampling happens in _read_and_subsample.
     existing = list(local_dir.rglob("*.parquet"))
-    if len(existing) >= n_episodes:
-        print(f"  Using {len(existing)} cached Parquet file(s) in {local_dir}")
-        return local_dir
 
     print(f"  Listing files in {hf_repo_id}...")
 
@@ -91,14 +90,41 @@ def _download_dataset(
         f for f in all_files
         if f.endswith(".parquet") and not f.startswith("README")
     )
-    print(f"  Repo has {len(parquet_remote)} Parquet files; downloading first {n_episodes}")
+
+    # Detect chunk-format repos (e.g. droid_1.0.1 packs hundreds of episodes per file).
+    # Read meta/info.json to determine episodes_per_file; limit downloads so we get
+    # at least n_episodes without fetching gigabytes of unnecessary chunks.
+    episodes_per_file = 1  # default: one episode per file (behavior1k style)
+    if "meta/info.json" in all_files:
+        try:
+            from huggingface_hub import hf_hub_download as _hf_dl
+            import json as _json
+            info_path = _hf_dl(hf_repo_id, "meta/info.json", repo_type="dataset")
+            info = _json.load(open(info_path))
+            total_eps = info.get("total_episodes", 0)
+            if total_eps and len(parquet_remote) > 0:
+                episodes_per_file = max(1, total_eps // len(parquet_remote))
+        except Exception:
+            pass
+
+    # How many chunk files needed to cover n_episodes?
+    files_needed = max(1, math.ceil(n_episodes / episodes_per_file))
+    if episodes_per_file > 1:
+        print(
+            f"  Repo has {len(parquet_remote)} chunk files "
+            f"(~{episodes_per_file} eps/file); "
+            f"downloading first {files_needed} to cover {n_episodes} episodes"
+        )
+    else:
+        print(f"  Repo has {len(parquet_remote)} Parquet files; downloading first {n_episodes}")
 
     # Skip already downloaded
     already_done = {p.name for p in existing}
+    files_still_needed = max(0, files_needed - len(existing))
     to_download = [
         f for f in parquet_remote
         if Path(f).name not in already_done
-    ][:max(0, n_episodes - len(existing))]
+    ][:files_still_needed]
 
     for i, remote_path in enumerate(to_download, 1):
         local_target = local_dir / Path(remote_path).name

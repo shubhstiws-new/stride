@@ -353,15 +353,15 @@ DATASET_REGISTRY: dict[str, tuple[str, Callable[[pl.DataFrame], pl.DataFrame]]] 
         normalize_behavior1k,
     ),
     "droid": (
-        "lerobot/droid",  # HF: Stanford DROID dataset in LeRobot Parquet format
+        "lerobot/droid_1.0.1",  # HF: Stanford DROID v1.0.1 — 95k episodes, v3.0 LeRobot format
         normalize_droid,
     ),
     "oxe": (
-        "lerobot/fractal20220817_data",  # OXE subset via LeRobot (RT-X fractal, ~100k episodes)
+        "lerobot/utaustin_mutex",  # HF: UT Austin MUTEX — 1500 eps, v3.0 LeRobot, OXE member
         normalize_oxe,
     ),
     "nvidia_physicalai": (
-        "nvidia/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim",  # NVIDIA Isaac Sim / GR00T
+        "lerobot/toto",  # HF: TOTO real-world manipulation, v3.0, 1003 eps, 325K frames
         normalize_nvidia_physicalai,
     ),
 }
