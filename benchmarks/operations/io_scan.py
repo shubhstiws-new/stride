@@ -142,6 +142,9 @@ def _run_pyspark_rapids(data_path: str, hardware_cfg: dict) -> tuple[int, float,
     if not rapids_jar:
         raise RuntimeError("rapids_jar path not set in hardware_cfg")
 
+    import os
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "1")
+
     proc = psutil.Process()
     mem_before = proc.memory_info().rss
 
@@ -153,8 +156,8 @@ def _run_pyspark_rapids(data_path: str, hardware_cfg: dict) -> tuple[int, float,
         .config("spark.driver.memory", spark_cfg.get("driver_memory", "16g"))
         .config("spark.plugins", "com.nvidia.spark.SQLPlugin")
         .config("spark.rapids.sql.enabled", "true")
-        .config("spark.executor.resource.gpu.amount", "1")
-        .config("spark.task.resource.gpu.amount", "1")
+        .config("spark.rapids.memory.gpu.minAllocFraction", "0")
+        .config("spark.rapids.memory.gpu.allocFraction", "0.7")
         .config("spark.rapids.memory.gpu.maxAllocFraction", "0.8")
         .config("spark.rapids.sql.concurrentGpuTasks", "2")
         .config("spark.jars", rapids_jar)

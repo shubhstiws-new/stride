@@ -246,6 +246,30 @@ def main() -> None:
         action="store_true",
         help="Resume from existing partial results file (skip completed cells)",
     )
+    # Storage mode — S3 / MinIO
+    parser.add_argument(
+        "--storage-mode",
+        default="local",
+        choices=["local", "s3", "minio"],
+        help="Storage backend for benchmark reads: local filesystem, AWS S3, or local MinIO (default: local)",
+    )
+    parser.add_argument(
+        "--s3-bucket",
+        default="robotics-bench",
+        help="S3 / MinIO bucket name (used when --storage-mode=s3 or minio)",
+    )
+    parser.add_argument(
+        "--s3-prefix",
+        default="benchmarks",
+        help="S3 key prefix (default: benchmarks)",
+    )
+    parser.add_argument(
+        "--minio-endpoint",
+        default="http://localhost:9000",
+        help="MinIO endpoint URL (used when --storage-mode=minio)",
+    )
+    parser.add_argument("--minio-access-key", default="minioadmin")
+    parser.add_argument("--minio-secret-key", default="minioadmin")
     args = parser.parse_args()
 
     datasets = [d.strip() for d in args.datasets.split(",")]
@@ -262,6 +286,16 @@ def main() -> None:
             "driver_memory": args.spark_driver_memory,
             "shuffle_partitions": args.spark_shuffle_partitions,
         },
+    }
+
+    # Storage mode configuration
+    storage_cfg = {
+        "storage_mode": args.storage_mode,
+        "s3_bucket": args.s3_bucket,
+        "s3_prefix": args.s3_prefix,
+        "minio_endpoint": args.minio_endpoint,
+        "minio_access_key": args.minio_access_key,
+        "minio_secret_key": args.minio_secret_key,
     }
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -295,6 +329,10 @@ def main() -> None:
     print(f"File sizes : {filesizes}")
     print(f"Operations : {operations}")
     print(f"Frameworks : {frameworks}")
+    print(f"Storage    : {args.storage_mode}" + (
+        f"  ({args.minio_endpoint})" if args.storage_mode == "minio" else
+        f"  (s3://{args.s3_bucket}/{args.s3_prefix})" if args.storage_mode == "s3" else ""
+    ))
     print(f"Data dir   : {data_dir}")
     print(f"Output dir : {output_dir}")
     print("=" * 70)
@@ -342,9 +380,20 @@ def main() -> None:
                         results.append(skip_result.to_dict())
                         continue
 
+                    # Resolve data path for storage mode (local / s3 / minio)
+                    if storage_cfg["storage_mode"] != "local":
+                        from benchmarks.datasets.s3_paths import resolve_data_path
+                        resolved_path = resolve_data_path(
+                            local_path=str(data_path),
+                            framework=framework,
+                            **storage_cfg,
+                        )
+                    else:
+                        resolved_path = str(data_path)
+
                     # Build kwargs for the worker
                     kwargs = {
-                        "data_path": str(data_path),
+                        "data_path": resolved_path,
                         "framework": framework,
                         "hardware_cfg": hardware_cfg,
                         "dataset": dataset,

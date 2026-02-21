@@ -16,6 +16,18 @@ from benchmarks.operations import MatrixResult, make_error_result
 
 _TASK_FILTER = ["0", "1", "2", "3", "4"]
 
+# Column name candidates in priority order (unified schema first, demo fallbacks second)
+_TASK_COL_CANDIDATES = ["task_id", "_task_id", "task_index", "robot_id"]
+_GROUP_COL_CANDIDATES = ["episode_id", "robot_id", "_connection_id", "signal_type"]
+
+
+def _resolve_col(columns: list[str], candidates: list[str]) -> str:
+    """Return the first candidate column that exists in columns."""
+    for c in candidates:
+        if c in columns:
+            return c
+    raise KeyError(f"None of {candidates} found in columns: {columns}")
+
 
 def _get_data_info(data_path: str) -> tuple[int, float]:
     files = list(Path(data_path).glob("*.parquet"))
@@ -32,9 +44,11 @@ def _run_polars(data_path: str) -> tuple[int, float, float, float, int]:
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
+    task_col = _resolve_col(df.columns, _TASK_COL_CANDIDATES)
+    group_col = _resolve_col(df.columns, _GROUP_COL_CANDIDATES)
     result = (
-        df.filter(pl.col("task_id").is_in(_TASK_FILTER))
-        .group_by("episode_id")
+        df.filter(pl.col(task_col).cast(pl.Utf8).is_in(_TASK_FILTER))
+        .group_by(group_col)
         .agg(
             pl.col("signal_value").mean().alias("avg_value"),
             pl.col("signal_value").std().alias("std_value"),
@@ -60,16 +74,19 @@ def _run_duckdb(data_path: str) -> tuple[int, float, float, float, int]:
     n = con.execute(f"SELECT COUNT(*) FROM read_parquet('{pattern}')").fetchone()[0]
     load_time = time.perf_counter() - t0
 
+    cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{pattern}') LIMIT 0").fetchall()]
+    task_col = _resolve_col(cols, _TASK_COL_CANDIDATES)
+    group_col = _resolve_col(cols, _GROUP_COL_CANDIDATES)
     task_list = ", ".join(f"'{t}'" for t in _TASK_FILTER)
     t1 = time.perf_counter()
     result = con.execute(f"""
-        SELECT episode_id,
+        SELECT {group_col},
                AVG(signal_value)    AS avg_value,
                STDDEV(signal_value) AS std_value,
                COUNT(*)             AS cnt
         FROM read_parquet('{pattern}')
-        WHERE task_id IN ({task_list})
-        GROUP BY episode_id
+        WHERE CAST({task_col} AS VARCHAR) IN ({task_list})
+        GROUP BY {group_col}
     """).df()
     result_rows = len(result)
     compute_time = time.perf_counter() - t1
@@ -92,8 +109,10 @@ def _run_pandas(data_path: str) -> tuple[int, float, float, float, int]:
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    filtered = df[df["task_id"].isin(_TASK_FILTER)]
-    result = filtered.groupby("episode_id")["signal_value"].agg(["mean", "std", "count"])
+    task_col = _resolve_col(list(df.columns), _TASK_COL_CANDIDATES)
+    group_col = _resolve_col(list(df.columns), _GROUP_COL_CANDIDATES)
+    filtered = df[df[task_col].astype(str).isin(_TASK_FILTER)]
+    result = filtered.groupby(group_col)["signal_value"].agg(["mean", "std", "count"])
     result_rows = len(result)
     compute_time = time.perf_counter() - t1
 
@@ -114,9 +133,11 @@ def _run_dask(data_path: str) -> tuple[int, float, float, float, int]:
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    filtered = ddf[ddf["task_id"].isin(_TASK_FILTER)]
+    task_col = _resolve_col(list(ddf.columns), _TASK_COL_CANDIDATES)
+    group_col = _resolve_col(list(ddf.columns), _GROUP_COL_CANDIDATES)
+    filtered = ddf[ddf[task_col].astype(str).isin(_TASK_FILTER)]
     result = (
-        filtered.groupby("episode_id")["signal_value"]
+        filtered.groupby(group_col)["signal_value"]
         .agg(["mean", "std", "count"])
         .compute()
     )
@@ -154,9 +175,11 @@ def _run_pyspark(data_path: str, hardware_cfg: dict) -> tuple[int, float, float,
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
+    task_col = _resolve_col(df.columns, _TASK_COL_CANDIDATES)
+    group_col = _resolve_col(df.columns, _GROUP_COL_CANDIDATES)
     result = (
-        df.filter(F.col("task_id").isin(_TASK_FILTER))
-        .groupBy("episode_id")
+        df.filter(F.col(task_col).cast("string").isin(_TASK_FILTER))
+        .groupBy(group_col)
         .agg(
             F.avg("signal_value").alias("avg_value"),
             F.stddev("signal_value").alias("std_value"),
@@ -181,6 +204,9 @@ def _run_pyspark_rapids(data_path: str, hardware_cfg: dict) -> tuple[int, float,
     if not rapids_jar:
         raise RuntimeError("rapids_jar path not set in hardware_cfg")
 
+    import os
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "1")
+
     proc = psutil.Process()
     mem_before = proc.memory_info().rss
     spark_cfg = hardware_cfg.get("spark_config", {})
@@ -192,8 +218,8 @@ def _run_pyspark_rapids(data_path: str, hardware_cfg: dict) -> tuple[int, float,
         .config("spark.driver.memory", spark_cfg.get("driver_memory", "16g"))
         .config("spark.plugins", "com.nvidia.spark.SQLPlugin")
         .config("spark.rapids.sql.enabled", "true")
-        .config("spark.executor.resource.gpu.amount", "1")
-        .config("spark.task.resource.gpu.amount", "1")
+        .config("spark.rapids.memory.gpu.minAllocFraction", "0")
+        .config("spark.rapids.memory.gpu.allocFraction", "0.7")
         .config("spark.rapids.memory.gpu.maxAllocFraction", "0.8")
         .config("spark.rapids.sql.concurrentGpuTasks", "2")
         .config("spark.jars", rapids_jar)
@@ -208,9 +234,11 @@ def _run_pyspark_rapids(data_path: str, hardware_cfg: dict) -> tuple[int, float,
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
+    task_col = _resolve_col(df.columns, _TASK_COL_CANDIDATES)
+    group_col = _resolve_col(df.columns, _GROUP_COL_CANDIDATES)
     result = (
-        df.filter(F.col("task_id").isin(_TASK_FILTER))
-        .groupBy("episode_id")
+        df.filter(F.col(task_col).cast("string").isin(_TASK_FILTER))
+        .groupBy(group_col)
         .agg(
             F.avg("signal_value").alias("avg_value"),
             F.stddev("signal_value").alias("std_value"),
@@ -235,9 +263,11 @@ def _run_cudf(data_path: str) -> tuple[int, float, float, float, int]:
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    filtered = df[df["task_id"].isin(_TASK_FILTER)]
+    task_col = _resolve_col(list(df.columns), _TASK_COL_CANDIDATES)
+    group_col = _resolve_col(list(df.columns), _GROUP_COL_CANDIDATES)
+    filtered = df[df[task_col].astype(str).isin(_TASK_FILTER)]
     result = (
-        filtered.groupby("episode_id")["signal_value"]
+        filtered.groupby(group_col)["signal_value"]
         .agg(["mean", "std", "count"])
     )
     result_rows = len(result)

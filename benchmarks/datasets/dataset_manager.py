@@ -182,6 +182,12 @@ def process_dataset(
     filesizes: list[str],
     output_dir: Path,
     cache_dir: Path,
+    minio_endpoint: str = "",
+    minio_bucket: str = "robotics-bench",
+    minio_prefix: str = "benchmarks",
+    minio_access_key: str = "minioadmin",
+    minio_secret_key: str = "minioadmin",
+    skip_upload: bool = False,
 ) -> None:
     hf_repo_id, normalize_fn = DATASET_REGISTRY[dataset_name]
 
@@ -225,6 +231,32 @@ def process_dataset(
         size_dir = output_dir / dataset_name / f"filesize={size_label}"
         _write_filesize_partition(normalized, size_dir, target_bytes, size_label)
 
+    # Step 6: Upload to MinIO (optional)
+    if minio_endpoint and not skip_upload:
+        print(f"\n  Uploading to MinIO ({minio_endpoint})...")
+        try:
+            from benchmarks.datasets.minio_uploader import (
+                _get_s3_client,
+                ensure_bucket,
+                upload_partition_dir,
+            )
+
+            s3_client = _get_s3_client(minio_endpoint, minio_access_key, minio_secret_key)
+            ensure_bucket(s3_client, minio_bucket)
+
+            for size_label in filesizes:
+                size_dir = output_dir / dataset_name / f"filesize={size_label}"
+                if not size_dir.exists():
+                    continue
+                n_files, n_bytes, elapsed = upload_partition_dir(
+                    s3_client, size_dir, output_dir, minio_bucket, minio_prefix
+                )
+                mb = n_bytes / 1024 / 1024
+                print(f"    {size_label}: {n_files} files, {mb:.1f} MB in {elapsed:.1f}s")
+        except Exception as e:
+            print(f"  WARNING: MinIO upload failed: {e}")
+            print("  Local files are still intact; re-run with --minio-endpoint to retry.")
+
     print(f"\n  Done: {dataset_name}")
 
 
@@ -260,6 +292,21 @@ def main() -> None:
         default="./data/.cache",
         help="Directory for raw HF downloads (default: ./data/.cache)",
     )
+    # MinIO upload (optional — skipped if --minio-endpoint not provided)
+    parser.add_argument(
+        "--minio-endpoint",
+        default="",
+        help="MinIO endpoint URL (e.g. http://localhost:9000). If set, uploads after partitioning.",
+    )
+    parser.add_argument("--minio-bucket", default="robotics-bench", help="MinIO S3 bucket name")
+    parser.add_argument("--minio-prefix", default="benchmarks", help="MinIO S3 key prefix")
+    parser.add_argument("--minio-access-key", default="minioadmin", help="MinIO access key")
+    parser.add_argument("--minio-secret-key", default="minioadmin", help="MinIO secret key")
+    parser.add_argument(
+        "--skip-upload",
+        action="store_true",
+        help="Skip MinIO upload even if --minio-endpoint is set",
+    )
     args = parser.parse_args()
 
     datasets = [d.strip() for d in args.datasets.split(",")]
@@ -289,6 +336,12 @@ def main() -> None:
                 filesizes=filesizes,
                 output_dir=output_dir,
                 cache_dir=cache_dir,
+                minio_endpoint=args.minio_endpoint,
+                minio_bucket=args.minio_bucket,
+                minio_prefix=args.minio_prefix,
+                minio_access_key=args.minio_access_key,
+                minio_secret_key=args.minio_secret_key,
+                skip_upload=args.skip_upload,
             )
         except Exception as e:
             print(f"\nERROR processing {dataset_name}: {e}")

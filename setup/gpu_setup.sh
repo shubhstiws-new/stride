@@ -10,6 +10,30 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 CONDA_ENV="rapids-spark"
+
+# ── Locate and initialise conda (works in non-interactive SSH sessions) ───────
+CONDA_BASE=""
+for candidate in \
+    "$HOME/miniconda3" \
+    "$HOME/anaconda3" \
+    "/opt/conda" \
+    "/opt/miniconda3" \
+    "/usr/local/conda"
+do
+    if [ -f "$candidate/bin/conda" ]; then
+        CONDA_BASE="$candidate"
+        break
+    fi
+done
+if [ -z "$CONDA_BASE" ]; then
+    echo "ERROR: conda not found. Install Miniconda first:"
+    echo "  wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/mc.sh"
+    echo "  bash /tmp/mc.sh -b -p ~/miniconda3 && ~/miniconda3/bin/conda init bash"
+    exit 1
+fi
+# shellcheck disable=SC1091
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+echo "  conda found at: $CONDA_BASE ($(conda --version))"
 RAPIDS_VERSION="25.02"
 CUDA_VERSION="12.0"
 PYSPARK_VERSION="4.0.0"
@@ -25,12 +49,13 @@ echo "============================================================"
 echo ""
 echo "[1/5] Verifying CUDA and GPU hardware..."
 nvidia-smi || { echo "ERROR: nvidia-smi failed. Check NVIDIA driver."; exit 1; }
-nvcc --version || { echo "ERROR: nvcc not found. Install CUDA toolkit."; exit 1; }
+nvcc --version || echo "  WARNING: nvcc not in PATH (CUDA compiler not installed). RAPIDS conda packages are pre-compiled and do not require nvcc — continuing."
 
 GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -c "RTX 3090" || true)
-echo "  Found ${GPU_COUNT}× RTX 3090"
-if [ "$GPU_COUNT" -lt 2 ]; then
-    echo "  WARNING: Expected 2× RTX 3090, found ${GPU_COUNT}. Proceeding anyway."
+echo "  Found ${GPU_COUNT}× RTX 3090 (Ti or standard)"
+nvidia-smi --query-gpu=name --format=csv,noheader | nl -ba
+if [ "$GPU_COUNT" -lt 1 ]; then
+    echo "  WARNING: No RTX 3090 detected. Proceeding anyway."
 fi
 
 # ── Step 2: Create RAPIDS conda environment ──────────────────

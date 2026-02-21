@@ -337,19 +337,19 @@ def normalize_nvidia_physicalai(raw_df: pl.DataFrame) -> pl.DataFrame:
 
 DATASET_REGISTRY: dict[str, tuple[str, Callable[[pl.DataFrame], pl.DataFrame]]] = {
     "behavior1k": (
-        "behavior-robot-lab/behavior-1k",  # HF repo ID (placeholder — check actual)
+        "behavior-1k/2025-challenge-demos",  # HF: 10k episodes, 119M frames, 50 household tasks
         normalize_behavior1k,
     ),
     "droid": (
-        "droid-dataset/droid",  # HF repo ID
+        "InternRobotics/RoboInter-Data",  # HF: 236k episodes, LeRobot v2.1 format
         normalize_droid,
     ),
     "oxe": (
-        "physical-intelligence/openx",  # HF repo ID (placeholder)
+        "lerobot/fractal20220817_data",  # OXE subset via LeRobot (RT-X fractal, ~100k episodes)
         normalize_oxe,
     ),
     "nvidia_physicalai": (
-        "nvidia/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim",  # HF repo ID
+        "nvidia/PhysicalAI-Robotics-GR00T-X-Embodiment-Sim",  # NVIDIA Isaac Sim / GR00T
         normalize_nvidia_physicalai,
     ),
 }

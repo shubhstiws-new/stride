@@ -48,6 +48,11 @@ def build_rapids_spark_session(
             "Run: bash setup/gpu_setup.sh  to download it."
         )
 
+    import os
+    # GPU 0 (3090 Ti) may be used by other processes (ComfyUI etc).
+    # GPU 1 (RTX 3090, 24 GB) is dedicated for benchmarks.
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "1")
+
     from pyspark.sql import SparkSession
 
     spark = (
@@ -62,7 +67,11 @@ def build_rapids_spark_session(
         # GPU resource allocation
         .config("spark.executor.resource.gpu.amount", "1")
         .config("spark.task.resource.gpu.amount", "1")
-        # Memory
+        # Memory — target GPU 1 (RTX 3090, 24 GB free).
+        # minAllocFraction=0 disables the lower-bound check.
+        # allocFraction=0.7 ensures pool < maxAllocFraction ceiling.
+        .config("spark.rapids.memory.gpu.minAllocFraction", "0")
+        .config("spark.rapids.memory.gpu.allocFraction", "0.7")
         .config("spark.rapids.memory.gpu.maxAllocFraction", str(gpu_max_alloc_fraction))
         .config("spark.rapids.sql.concurrentGpuTasks", str(concurrent_gpu_tasks))
         # JAR
