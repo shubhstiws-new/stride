@@ -9,7 +9,7 @@
 # Push:
 #   docker push <hub>/hsm-bench-worker-gpu:latest
 
-FROM rapidsai/base:25.12-cuda12.5-py3.11
+FROM rapidsai/base:25.12-cuda12-py3.11
 
 USER root
 
