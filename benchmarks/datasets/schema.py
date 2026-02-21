@@ -341,7 +341,7 @@ DATASET_REGISTRY: dict[str, tuple[str, Callable[[pl.DataFrame], pl.DataFrame]]] 
         normalize_behavior1k,
     ),
     "droid": (
-        "InternRobotics/RoboInter-Data",  # HF: 236k episodes, LeRobot v2.1 format
+        "lerobot/droid",  # HF: Stanford DROID dataset in LeRobot Parquet format
         normalize_droid,
     ),
     "oxe": (
