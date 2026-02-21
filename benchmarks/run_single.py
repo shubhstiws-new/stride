@@ -22,6 +22,7 @@ Usage (inside pod, called by Dockerfile ENTRYPOINT):
         --local-data-dir /data/behavior1k \\
         --hardware linux-k8s
 """
+from __future__ import annotations
 
 import argparse
 import json

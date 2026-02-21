@@ -8,6 +8,8 @@ WHERE task_id IN ['0','1','2','3','4']
 Measures typical ETL aggregation performance.
 """
 
+from __future__ import annotations
+
 import time
 import tracemalloc
 from pathlib import Path

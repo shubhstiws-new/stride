@@ -7,6 +7,8 @@ df a JOIN df b ON a.task_id = b.task_id AND a.episode_id != b.episode_id
 Simulates cross-robot cross-dataset analysis, measures shuffle cost.
 """
 
+from __future__ import annotations
+
 import time
 import tracemalloc
 from pathlib import Path

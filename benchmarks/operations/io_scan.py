@@ -5,6 +5,8 @@ Measures Parquet decode and file-open overhead with no compute beyond counting.
 Framework dispatch via `framework` argument.
 """
 
+from __future__ import annotations
+
 import glob
 import time
 import tracemalloc

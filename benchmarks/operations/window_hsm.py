@@ -6,6 +6,8 @@ Reuses session_detector.py for PySpark path directly.
 Supports both local filesystem paths and S3/MinIO URIs.
 """
 
+from __future__ import annotations
+
 import os
 import time
 import tracemalloc

@@ -4,6 +4,8 @@ Operations layer for the benchmark matrix.
 Each operation module exposes: run(data_path, framework, hardware_cfg) -> MatrixResult
 """
 
+from __future__ import annotations
+
 from dataclasses import asdict, dataclass
 
 
