@@ -7,20 +7,13 @@ Framework dispatch via `framework` argument.
 
 from __future__ import annotations
 
-import glob
 import time
 import tracemalloc
 from pathlib import Path
 
-from benchmarks.operations import MatrixResult, make_error_result
-
-
-def _get_data_info(data_path: str) -> tuple[int, float]:
-    """Return (num_files, total_size_mb)."""
-    files = list(Path(data_path).glob("*.parquet"))
-    n = len(files)
-    total_bytes = sum(f.stat().st_size for f in files)
-    return n, total_bytes / 1024 / 1024
+from benchmarks.operations import (
+    MatrixResult, make_error_result, glob_pattern, get_data_info, build_spark_session,
+)
 
 
 def _run_polars(data_path: str) -> tuple[int, float, float, float]:
@@ -29,7 +22,7 @@ def _run_polars(data_path: str) -> tuple[int, float, float, float]:
 
     tracemalloc.start()
     t0 = time.perf_counter()
-    df = pl.read_parquet(str(Path(data_path) / "*.parquet"))
+    df = pl.read_parquet(glob_pattern(data_path))
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
@@ -46,10 +39,9 @@ def _run_duckdb(data_path: str) -> tuple[int, float, float, float]:
 
     tracemalloc.start()
     con = duckdb.connect(":memory:")
-    pattern = str(Path(data_path) / "*.parquet")
+    pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
-    # DuckDB reads lazily; force materialization via COUNT(*)
     result = con.execute(f"SELECT COUNT(*) FROM read_parquet('{pattern}')").fetchone()
     load_time = time.perf_counter() - t0
 
@@ -67,11 +59,10 @@ def _run_pandas(data_path: str) -> tuple[int, float, float, float]:
     import pandas as pd
 
     tracemalloc.start()
-    files = sorted(Path(data_path).glob("*.parquet"))
+    pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
-    frames = [pd.read_parquet(str(f)) for f in files]
-    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    df = pd.read_parquet(pattern)
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
@@ -87,7 +78,7 @@ def _run_dask(data_path: str) -> tuple[int, float, float, float]:
     import dask.dataframe as dd
 
     tracemalloc.start()
-    pattern = str(Path(data_path) / "*.parquet")
+    pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
     ddf = dd.read_parquet(pattern)
@@ -103,23 +94,7 @@ def _run_dask(data_path: str) -> tuple[int, float, float, float]:
 
 
 def _run_pyspark(data_path: str, hardware_cfg: dict) -> tuple[int, float, float, float]:
-    import psutil
-    from pyspark.sql import SparkSession
-
-    proc = psutil.Process()
-    mem_before = proc.memory_info().rss
-
-    spark_cfg = hardware_cfg.get("spark_config", {})
-    builder = (
-        SparkSession.builder
-        .appName("matrix-io-scan")
-        .master(spark_cfg.get("master", "local[*]"))
-        .config("spark.driver.memory", spark_cfg.get("driver_memory", "8g"))
-        .config("spark.sql.shuffle.partitions", str(spark_cfg.get("shuffle_partitions", 8)))
-        .config("spark.ui.showConsoleProgress", "false")
-    )
-    spark = builder.getOrCreate()
-    spark.sparkContext.setLogLevel("ERROR")
+    spark, proc, mem_before = build_spark_session("matrix-io-scan", data_path, hardware_cfg)
 
     t0 = time.perf_counter()
     df = spark.read.parquet(data_path)
@@ -136,37 +111,9 @@ def _run_pyspark(data_path: str, hardware_cfg: dict) -> tuple[int, float, float,
 
 
 def _run_pyspark_rapids(data_path: str, hardware_cfg: dict) -> tuple[int, float, float, float]:
-    """PySpark with RAPIDS GPU plugin."""
-    import psutil
-    from pyspark.sql import SparkSession
-
-    rapids_jar = hardware_cfg.get("rapids_jar", "")
-    if not rapids_jar:
-        raise RuntimeError("rapids_jar path not set in hardware_cfg")
-
-    import os
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "1")
-
-    proc = psutil.Process()
-    mem_before = proc.memory_info().rss
-
-    spark_cfg = hardware_cfg.get("spark_config", {})
-    spark = (
-        SparkSession.builder
-        .appName("matrix-io-scan-rapids")
-        .master(spark_cfg.get("master", "local[*]"))
-        .config("spark.driver.memory", spark_cfg.get("driver_memory", "16g"))
-        .config("spark.plugins", "com.nvidia.spark.SQLPlugin")
-        .config("spark.rapids.sql.enabled", "true")
-        .config("spark.rapids.memory.gpu.minAllocFraction", "0")
-        .config("spark.rapids.memory.gpu.allocFraction", "0.7")
-        .config("spark.rapids.memory.gpu.maxAllocFraction", "0.8")
-        .config("spark.rapids.sql.concurrentGpuTasks", "2")
-        .config("spark.jars", rapids_jar)
-        .config("spark.ui.showConsoleProgress", "false")
-        .getOrCreate()
+    spark, proc, mem_before = build_spark_session(
+        "matrix-io-scan-rapids", data_path, hardware_cfg, rapids=True,
     )
-    spark.sparkContext.setLogLevel("ERROR")
 
     t0 = time.perf_counter()
     df = spark.read.parquet(data_path)
@@ -186,7 +133,7 @@ def _run_cudf(data_path: str) -> tuple[int, float, float, float]:
     import cudf
 
     t0 = time.perf_counter()
-    df = cudf.read_parquet(str(Path(data_path) / "*.parquet"))
+    df = cudf.read_parquet(glob_pattern(data_path))
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
@@ -218,7 +165,7 @@ def run(
     hardware: str,
 ) -> MatrixResult:
     """Run IO scan benchmark for the given framework."""
-    num_files, actual_file_size_mb = _get_data_info(data_path)
+    num_files, actual_file_size_mb = get_data_info(data_path)
     gpu_memory_mb = 0.0
     t_wall = time.perf_counter()
 

@@ -13,7 +13,9 @@ import time
 import tracemalloc
 from pathlib import Path
 
-from benchmarks.operations import MatrixResult, make_error_result
+from benchmarks.operations import (
+    MatrixResult, make_error_result, glob_pattern, get_data_info, build_spark_session,
+)
 
 # Column name candidates in priority order (unified schema first, demo fallbacks second)
 _JOIN_COL_CANDIDATES = ["task_id", "_task_id", "task_index", "robot_id"]
@@ -28,24 +30,18 @@ def _resolve_col(columns: list[str], candidates: list[str]) -> str:
     raise KeyError(f"None of {candidates} found in columns: {columns}")
 
 
-def _get_data_info(data_path: str) -> tuple[int, float]:
-    files = list(Path(data_path).glob("*.parquet"))
-    return len(files), sum(f.stat().st_size for f in files) / 1024 / 1024
-
-
 def _run_polars(data_path: str) -> tuple[int, float, float, float, int]:
     import polars as pl
 
     tracemalloc.start()
     t0 = time.perf_counter()
-    df = pl.read_parquet(str(Path(data_path) / "*.parquet"))
+    df = pl.read_parquet(glob_pattern(data_path))
     n = len(df)
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
     join_col = _resolve_col(df.columns, _JOIN_COL_CANDIDATES)
     pair_col = _resolve_col(df.columns, _PAIR_COL_CANDIDATES)
-    # Deduplicate to (join_col, pair_col) pairs to keep join tractable
     pairs = df.select([join_col, pair_col]).unique()
     joined = pairs.join(pairs, on=join_col, how="inner", suffix="_b").filter(
         pl.col(pair_col) != pl.col(f"{pair_col}_b")
@@ -63,7 +59,7 @@ def _run_duckdb(data_path: str) -> tuple[int, float, float, float, int]:
 
     tracemalloc.start()
     con = duckdb.connect(":memory:")
-    pattern = str(Path(data_path) / "*.parquet")
+    pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
     n = con.execute(f"SELECT COUNT(*) FROM read_parquet('{pattern}')").fetchone()[0]
@@ -97,10 +93,10 @@ def _run_pandas(data_path: str) -> tuple[int, float, float, float, int]:
     import pandas as pd
 
     tracemalloc.start()
-    files = sorted(Path(data_path).glob("*.parquet"))
+    pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
-    df = pd.concat([pd.read_parquet(str(f)) for f in files], ignore_index=True)
+    df = pd.read_parquet(pattern)
     n = len(df)
     load_time = time.perf_counter() - t0
 
@@ -122,7 +118,7 @@ def _run_dask(data_path: str) -> tuple[int, float, float, float, int]:
     import dask.dataframe as dd
 
     tracemalloc.start()
-    pattern = str(Path(data_path) / "*.parquet")
+    pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
     ddf = dd.read_parquet(pattern)
@@ -130,14 +126,13 @@ def _run_dask(data_path: str) -> tuple[int, float, float, float, int]:
     join_col = _resolve_col(cols, _JOIN_COL_CANDIDATES)
     pair_col = _resolve_col(cols, _PAIR_COL_CANDIDATES)
     df = ddf[[join_col, pair_col]].drop_duplicates().compute()
-    n_approx = len(ddf)  # note: may trigger extra compute; use len of full df
+    n_approx = len(ddf)
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
     joined = df.merge(df, on=join_col, suffixes=("_a", "_b"))
     joined = joined[joined[f"{pair_col}_a"] != joined[f"{pair_col}_b"]]
     result_rows = len(joined)
-    # Reload to get true n
     n = len(dd.read_parquet(pattern).compute())
     compute_time = time.perf_counter() - t1
 
@@ -147,24 +142,9 @@ def _run_dask(data_path: str) -> tuple[int, float, float, float, int]:
 
 
 def _run_pyspark(data_path: str, hardware_cfg: dict) -> tuple[int, float, float, float, int]:
-    import psutil
-    from pyspark.sql import SparkSession
     from pyspark.sql import functions as F
 
-    proc = psutil.Process()
-    mem_before = proc.memory_info().rss
-    spark_cfg = hardware_cfg.get("spark_config", {})
-
-    spark = (
-        SparkSession.builder
-        .appName("matrix-join")
-        .master(spark_cfg.get("master", "local[*]"))
-        .config("spark.driver.memory", spark_cfg.get("driver_memory", "8g"))
-        .config("spark.sql.shuffle.partitions", str(spark_cfg.get("shuffle_partitions", 8)))
-        .config("spark.ui.showConsoleProgress", "false")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("ERROR")
+    spark, proc, mem_before = build_spark_session("matrix-join", data_path, hardware_cfg)
 
     t0 = time.perf_counter()
     df = spark.read.parquet(data_path)
@@ -188,34 +168,11 @@ def _run_pyspark(data_path: str, hardware_cfg: dict) -> tuple[int, float, float,
 
 
 def _run_pyspark_rapids(data_path: str, hardware_cfg: dict) -> tuple[int, float, float, float, int]:
-    import psutil
-    from pyspark.sql import SparkSession
     from pyspark.sql import functions as F
 
-    rapids_jar = hardware_cfg.get("rapids_jar", "")
-    if not rapids_jar:
-        raise RuntimeError("rapids_jar path not set in hardware_cfg")
-
-    proc = psutil.Process()
-    mem_before = proc.memory_info().rss
-    spark_cfg = hardware_cfg.get("spark_config", {})
-
-    spark = (
-        SparkSession.builder
-        .appName("matrix-join-rapids")
-        .master(spark_cfg.get("master", "local[*]"))
-        .config("spark.driver.memory", spark_cfg.get("driver_memory", "16g"))
-        .config("spark.plugins", "com.nvidia.spark.SQLPlugin")
-        .config("spark.rapids.sql.enabled", "true")
-        .config("spark.executor.resource.gpu.amount", "1")
-        .config("spark.task.resource.gpu.amount", "1")
-        .config("spark.rapids.memory.gpu.maxAllocFraction", "0.8")
-        .config("spark.rapids.sql.concurrentGpuTasks", "2")
-        .config("spark.jars", rapids_jar)
-        .config("spark.ui.showConsoleProgress", "false")
-        .getOrCreate()
+    spark, proc, mem_before = build_spark_session(
+        "matrix-join-rapids", data_path, hardware_cfg, rapids=True,
     )
-    spark.sparkContext.setLogLevel("ERROR")
 
     t0 = time.perf_counter()
     df = spark.read.parquet(data_path)
@@ -242,7 +199,7 @@ def _run_cudf(data_path: str) -> tuple[int, float, float, float, int]:
     import cudf
 
     t0 = time.perf_counter()
-    df = cudf.read_parquet(str(Path(data_path) / "*.parquet"))
+    df = cudf.read_parquet(glob_pattern(data_path))
     n = len(df)
     load_time = time.perf_counter() - t0
 
@@ -278,7 +235,7 @@ def run(
     hardware: str,
 ) -> MatrixResult:
     """Run self-join benchmark for the given framework."""
-    num_files, actual_file_size_mb = _get_data_info(data_path)
+    num_files, actual_file_size_mb = get_data_info(data_path)
     gpu_memory_mb = 0.0
     t_wall = time.perf_counter()
 
