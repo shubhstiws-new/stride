@@ -49,6 +49,63 @@ def get_data_info(data_path: str) -> tuple[int, float]:
     return len(files), sum(f.stat().st_size for f in files) / 1024 / 1024
 
 
+def configure_duckdb_s3(con) -> None:
+    """Configure a DuckDB connection for MinIO-compatible S3 access via httpfs."""
+    endpoint = os.environ.get("AWS_ENDPOINT_URL", "http://localhost:9000")
+    host = endpoint.replace("https://", "").replace("http://", "")
+    use_ssl = endpoint.startswith("https://")
+    access_key = os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin")
+    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin")
+    con.execute("INSTALL httpfs; LOAD httpfs;")
+    con.execute(f"SET s3_endpoint='{host}';")
+    con.execute(f"SET s3_use_ssl={'true' if use_ssl else 'false'};")
+    con.execute("SET s3_url_style='path';")
+    con.execute(f"SET s3_access_key_id='{access_key}';")
+    con.execute(f"SET s3_secret_access_key='{secret_key}';")
+    con.execute("SET s3_region='us-east-1';")
+
+
+def s3_storage_opts() -> dict:
+    """Build s3fs/fsspec storage options for pandas/dask."""
+    return {
+        "endpoint_url": os.environ.get("AWS_ENDPOINT_URL", "http://localhost:9000"),
+        "key": os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin"),
+        "secret": os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin"),
+    }
+
+
+def read_parquet_pandas(data_path: str):
+    """Read parquet files into a pandas DataFrame, handling S3 and local paths."""
+    import pandas as pd
+
+    if is_s3_path(data_path):
+        import s3fs
+        opts = s3_storage_opts()
+        fs = s3fs.S3FileSystem(
+            endpoint_url=opts["endpoint_url"],
+            key=opts["key"],
+            secret=opts["secret"],
+        )
+        s3_glob = glob_pattern(data_path).replace("s3://", "")
+        raw_paths = fs.glob(s3_glob)
+        file_paths = ["s3://" + p for p in raw_paths]
+        return pd.concat(
+            [pd.read_parquet(f, storage_options=opts) for f in file_paths],
+            ignore_index=True,
+        )
+    return pd.read_parquet(glob_pattern(data_path))
+
+
+def read_parquet_dask(data_path: str):
+    """Read parquet files into a dask DataFrame, handling S3 and local paths."""
+    import dask.dataframe as dd
+
+    pattern = glob_pattern(data_path)
+    if is_s3_path(data_path):
+        return dd.read_parquet(pattern, storage_options=s3_storage_opts())
+    return dd.read_parquet(pattern)
+
+
 def build_spark_session(
     app_name: str,
     data_path: str,

@@ -35,9 +35,11 @@ RUN pip install --no-cache-dir \
 COPY . /app
 WORKDIR /app
 
-# Add repo root to PYTHONPATH so benchmarks.* and hsm_pyspark.* are importable
-# (avoids Python version mismatch: base image uses Python 3.8)
-ENV PYTHONPATH=/app
+# Add repo root + Spark python to PYTHONPATH
+ENV PYTHONPATH=/app:/opt/spark/python
+
+# Ensure /home/spark exists (DuckDB httpfs extension needs a writable home directory)
+RUN mkdir -p /home/spark && chown spark:spark /home/spark
 
 # hadoop-aws + aws-sdk JARs for S3A support (must match Spark 3.5.5 hadoop version)
 # Spark 3.5.5 ships with Hadoop 3.3.4

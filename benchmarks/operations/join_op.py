@@ -15,6 +15,7 @@ from pathlib import Path
 
 from benchmarks.operations import (
     MatrixResult, make_error_result, glob_pattern, get_data_info, build_spark_session,
+    is_s3_path, configure_duckdb_s3, read_parquet_pandas, read_parquet_dask,
 )
 
 # Column name candidates in priority order (unified schema first, demo fallbacks second)
@@ -59,6 +60,8 @@ def _run_duckdb(data_path: str) -> tuple[int, float, float, float, int]:
 
     tracemalloc.start()
     con = duckdb.connect(":memory:")
+    if is_s3_path(data_path):
+        configure_duckdb_s3(con)
     pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
@@ -93,10 +96,9 @@ def _run_pandas(data_path: str) -> tuple[int, float, float, float, int]:
     import pandas as pd
 
     tracemalloc.start()
-    pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
-    df = pd.read_parquet(pattern)
+    df = read_parquet_pandas(data_path)
     n = len(df)
     load_time = time.perf_counter() - t0
 
@@ -118,10 +120,9 @@ def _run_dask(data_path: str) -> tuple[int, float, float, float, int]:
     import dask.dataframe as dd
 
     tracemalloc.start()
-    pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
-    ddf = dd.read_parquet(pattern)
+    ddf = read_parquet_dask(data_path)
     cols = list(ddf.columns)
     join_col = _resolve_col(cols, _JOIN_COL_CANDIDATES)
     pair_col = _resolve_col(cols, _PAIR_COL_CANDIDATES)
@@ -133,7 +134,7 @@ def _run_dask(data_path: str) -> tuple[int, float, float, float, int]:
     joined = df.merge(df, on=join_col, suffixes=("_a", "_b"))
     joined = joined[joined[f"{pair_col}_a"] != joined[f"{pair_col}_b"]]
     result_rows = len(joined)
-    n = len(dd.read_parquet(pattern).compute())
+    n = n_approx
     compute_time = time.perf_counter() - t1
 
     _, peak = tracemalloc.get_traced_memory()

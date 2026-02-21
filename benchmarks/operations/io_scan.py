@@ -13,6 +13,7 @@ from pathlib import Path
 
 from benchmarks.operations import (
     MatrixResult, make_error_result, glob_pattern, get_data_info, build_spark_session,
+    is_s3_path, configure_duckdb_s3, read_parquet_pandas, read_parquet_dask,
 )
 
 
@@ -39,6 +40,8 @@ def _run_duckdb(data_path: str) -> tuple[int, float, float, float]:
 
     tracemalloc.start()
     con = duckdb.connect(":memory:")
+    if is_s3_path(data_path):
+        configure_duckdb_s3(con)
     pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
@@ -56,13 +59,10 @@ def _run_duckdb(data_path: str) -> tuple[int, float, float, float]:
 
 
 def _run_pandas(data_path: str) -> tuple[int, float, float, float]:
-    import pandas as pd
-
     tracemalloc.start()
-    pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
-    df = pd.read_parquet(pattern)
+    df = read_parquet_pandas(data_path)
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
@@ -75,13 +75,10 @@ def _run_pandas(data_path: str) -> tuple[int, float, float, float]:
 
 
 def _run_dask(data_path: str) -> tuple[int, float, float, float]:
-    import dask.dataframe as dd
-
     tracemalloc.start()
-    pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
-    ddf = dd.read_parquet(pattern)
+    ddf = read_parquet_dask(data_path)
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()

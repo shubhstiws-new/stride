@@ -16,6 +16,7 @@ from pathlib import Path
 
 from benchmarks.operations import (
     MatrixResult, make_error_result, glob_pattern, get_data_info, build_spark_session,
+    is_s3_path, configure_duckdb_s3, read_parquet_pandas, read_parquet_dask,
 )
 
 _NUM_TASK_FILTER = 5  # number of distinct task_id values to filter on
@@ -74,6 +75,8 @@ def _run_duckdb(data_path: str) -> tuple[int, float, float, float, int]:
 
     tracemalloc.start()
     con = duckdb.connect(":memory:")
+    if is_s3_path(data_path):
+        configure_duckdb_s3(con)
     pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
@@ -113,10 +116,9 @@ def _run_pandas(data_path: str) -> tuple[int, float, float, float, int]:
     import pandas as pd
 
     tracemalloc.start()
-    pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
-    df = pd.read_parquet(pattern)
+    df = read_parquet_pandas(data_path)
     n = len(df)
     load_time = time.perf_counter() - t0
 
@@ -135,13 +137,10 @@ def _run_pandas(data_path: str) -> tuple[int, float, float, float, int]:
 
 
 def _run_dask(data_path: str) -> tuple[int, float, float, float, int]:
-    import dask.dataframe as dd
-
     tracemalloc.start()
-    pattern = glob_pattern(data_path)
 
     t0 = time.perf_counter()
-    ddf = dd.read_parquet(pattern)
+    ddf = read_parquet_dask(data_path)
     n = len(ddf)
     load_time = time.perf_counter() - t0
 
