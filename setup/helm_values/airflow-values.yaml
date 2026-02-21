@@ -33,7 +33,6 @@ webserver:
       memory: 2Gi
   service:
     type: ClusterIP
-    port: 8080
 
 # ── Database (bundled PostgreSQL) ─────────────────────────────────────────────
 postgresql:
