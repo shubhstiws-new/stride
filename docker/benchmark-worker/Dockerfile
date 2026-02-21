@@ -36,7 +36,7 @@ COPY . /app
 WORKDIR /app
 
 # Install hsm-pyspark package (no-deps: Spark already in base image)
-RUN pip install --no-cache-dir --no-deps -e .
+RUN pip install --no-cache-dir --no-deps .
 
 # hadoop-aws + aws-sdk JARs for S3A support (must match Spark 3.5.5 hadoop version)
 # Spark 3.5.5 ships with Hadoop 3.3.4

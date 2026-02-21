@@ -27,6 +27,6 @@ COPY . /app
 WORKDIR /app
 
 # Install hsm-pyspark package (cuDF image has no Spark; no-deps install)
-RUN pip install --no-cache-dir --no-deps -e .
+RUN pip install --no-cache-dir --no-deps .
 
 ENTRYPOINT ["python3", "/app/benchmarks/run_single.py"]
