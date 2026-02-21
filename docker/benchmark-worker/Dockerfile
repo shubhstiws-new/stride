@@ -35,8 +35,8 @@ RUN pip install --no-cache-dir \
 COPY . /app
 WORKDIR /app
 
-# Add repo root + Spark python to PYTHONPATH
-ENV PYTHONPATH=/app:/opt/spark/python
+# Add repo root + Spark python + py4j to PYTHONPATH
+ENV PYTHONPATH=/app:/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.7-src.zip
 
 # Ensure /home/spark exists (DuckDB httpfs extension needs a writable home directory)
 RUN mkdir -p /home/spark && chown spark:spark /home/spark
