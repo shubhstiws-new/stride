@@ -35,8 +35,9 @@ RUN pip install --no-cache-dir \
 COPY . /app
 WORKDIR /app
 
-# Install hsm-pyspark package (no-deps: Spark already in base image)
-RUN pip install --no-cache-dir --no-deps .
+# Add repo root to PYTHONPATH so benchmarks.* and hsm_pyspark.* are importable
+# (avoids Python version mismatch: base image uses Python 3.8)
+ENV PYTHONPATH=/app
 
 # hadoop-aws + aws-sdk JARs for S3A support (must match Spark 3.5.5 hadoop version)
 # Spark 3.5.5 ships with Hadoop 3.3.4
