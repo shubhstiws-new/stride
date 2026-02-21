@@ -161,9 +161,9 @@ def make_task(
     sa_name = "spark" if profile in ("spark", "spark-rapids") else "default"
 
     # GPU pods need the nvidia RuntimeClass to access GPUs
-    pod_override = None
+    extra_kwargs = {}
     if profile in ("gpu", "spark-rapids"):
-        pod_override = k8s.V1Pod(
+        extra_kwargs["pod_override"] = k8s.V1Pod(
             spec=k8s.V1PodSpec(
                 runtime_class_name="nvidia",
                 containers=[k8s.V1Container(name="base")],
@@ -185,7 +185,6 @@ def make_task(
         get_logs=True,
         log_events_on_failure=True,
         startup_timeout_seconds=300,
-        pod_override=pod_override,
         # Allow GPU / Spark tasks to take longer
         execution_timeout=timedelta(minutes=60 if profile in ("spark", "spark-rapids", "gpu") else 30),
         # Retry once on transient failures
@@ -194,6 +193,7 @@ def make_task(
         dag=dag,
         # Don't fail the whole DAG if one cell fails
         trigger_rule="all_done",
+        **extra_kwargs,
     )
 
 
