@@ -160,6 +160,16 @@ def make_task(
 
     sa_name = "spark" if profile in ("spark", "spark-rapids") else "default"
 
+    # GPU pods need the nvidia RuntimeClass to access GPUs
+    pod_override = None
+    if profile in ("gpu", "spark-rapids"):
+        pod_override = k8s.V1Pod(
+            spec=k8s.V1PodSpec(
+                runtime_class_name="nvidia",
+                containers=[k8s.V1Container(name="base")],
+            )
+        )
+
     return KubernetesPodOperator(
         task_id=task_id,
         name=f"bench-{task_id.replace('_', '-').replace('--', '-')}",
@@ -175,6 +185,7 @@ def make_task(
         get_logs=True,
         log_events_on_failure=True,
         startup_timeout_seconds=300,
+        pod_override=pod_override,
         # Allow GPU / Spark tasks to take longer
         execution_timeout=timedelta(minutes=60 if profile in ("spark", "spark-rapids", "gpu") else 30),
         # Retry once on transient failures
@@ -230,7 +241,7 @@ with DAG(
     schedule=None,       # manual trigger only
     catchup=False,
     max_active_runs=1,
-    max_active_tasks=16,  # ~11 CPU pods + 2 GPU pods + 2 Spark driver pods + slack
+    max_active_tasks=1,   # sequential execution for clean, unbiased results
     tags=["benchmark", "sprint3b"],
 ) as dag:
 
