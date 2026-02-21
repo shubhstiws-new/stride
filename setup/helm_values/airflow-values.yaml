@@ -49,9 +49,10 @@ dags:
     repo: https://github.com/shubhstiws-new/hsm-pyspark.git
     branch: dev
     rev: HEAD
+    ref: dev
     depth: 1
     maxFailures: 3
-    subPath: "airflow/dags"
+    subPath: ""
     wait: 60
     containerName: git-sync
     uid: 65533
@@ -75,6 +76,7 @@ config:
     max_active_tasks_per_dag: "16"
     max_active_runs_per_dag: "2"
     load_examples: "False"
+    dags_folder: "/opt/airflow/dags/repo/airflow/dags"
   kubernetes_executor:
     namespace: "hsm-bench"
     worker_container_repository: apache/airflow

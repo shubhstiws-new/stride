@@ -39,7 +39,7 @@ SPARK_MASTER   = "k8s://https://kubernetes.default.svc:6443"
 NAMESPACE      = "hsm-bench"
 BUCKET         = "robotics-bench"
 
-DATASETS  = ["behavior1k", "lerobot", "gr00t"]
+DATASETS  = ["behavior1k", "droid", "oxe"]
 FILESIZES = ["1mb", "10mb"]
 OPERATIONS = ["io_scan", "filter_agg", "window_hsm", "join_op"]
 
@@ -195,8 +195,9 @@ def make_collect_task(dag: DAG, run_id: str) -> KubernetesPodOperator:
         name="bench-collect-results",
         namespace=NAMESPACE,
         image=CPU_IMAGE,
+        cmds=["python3"],
         arguments=[
-            "python3", "benchmarks/collect_results_s3.py",
+            "/app/benchmarks/collect_results_s3.py",
             "--run-id", run_id,
             "--minio-endpoint", MINIO_ENDPOINT,
             "--bucket", BUCKET,
