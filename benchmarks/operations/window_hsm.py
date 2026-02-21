@@ -3,8 +3,10 @@ Operation 3: Window / HSM — Gap-based session detection.
 
 Uses 5-second gap threshold to detect sessions per episode_id.
 Reuses session_detector.py for PySpark path directly.
+Supports both local filesystem paths and S3/MinIO URIs.
 """
 
+import os
 import time
 import tracemalloc
 from pathlib import Path
@@ -15,22 +17,81 @@ _GAP_THRESHOLD_S = 5.0
 _US_PER_S = 1_000_000
 
 
+# ── S3 / local path helpers ───────────────────────────────────────────────────
+
+def _is_s3_path(path: str) -> bool:
+    return path.startswith("s3://") or path.startswith("s3a://")
+
+
+def _glob_pattern(data_path: str) -> str:
+    """Return parquet glob pattern for local or S3 paths."""
+    if _is_s3_path(data_path):
+        return data_path.rstrip("/") + "/*.parquet"
+    return str(Path(data_path) / "*.parquet")
+
+
 def _get_data_info(data_path: str) -> tuple[int, float]:
+    if _is_s3_path(data_path):
+        try:
+            import boto3
+            from urllib.parse import urlparse
+            parsed = urlparse(data_path)
+            bucket = parsed.netloc
+            prefix = parsed.path.lstrip("/")
+            endpoint = os.environ.get("AWS_ENDPOINT_URL", "http://localhost:9000")
+            s3 = boto3.client(
+                "s3",
+                endpoint_url=endpoint,
+                aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin"),
+                aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin"),
+            )
+            resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+            objects = [o for o in resp.get("Contents", []) if o["Key"].endswith(".parquet")]
+            return len(objects), sum(o["Size"] for o in objects) / 1024 / 1024
+        except Exception:
+            return 0, 0.0
     files = list(Path(data_path).glob("*.parquet"))
     return len(files), sum(f.stat().st_size for f in files) / 1024 / 1024
 
+
+def _configure_duckdb_minio(con) -> None:
+    """Configure DuckDB httpfs for MinIO-compatible S3 endpoint."""
+    endpoint = os.environ.get("AWS_ENDPOINT_URL", "http://localhost:9000")
+    host = endpoint.replace("https://", "").replace("http://", "")
+    use_ssl = endpoint.startswith("https://")
+    access_key = os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin")
+    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin")
+    con.execute("INSTALL httpfs; LOAD httpfs;")
+    con.execute(f"SET s3_endpoint='{host}';")
+    con.execute(f"SET s3_use_ssl={'true' if use_ssl else 'false'};")
+    con.execute("SET s3_url_style='path';")
+    con.execute(f"SET s3_access_key_id='{access_key}';")
+    con.execute(f"SET s3_secret_access_key='{secret_key}';")
+    con.execute("SET s3_region='us-east-1';")
+
+
+def _s3_storage_opts() -> dict:
+    """Build s3fs/fsspec storage options for pandas/dask."""
+    return {
+        "endpoint_url": os.environ.get("AWS_ENDPOINT_URL", "http://localhost:9000"),
+        "key": os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin"),
+        "secret": os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin"),
+    }
+
+
+# ── Framework runners ─────────────────────────────────────────────────────────
 
 def _run_polars(data_path: str) -> tuple[int, float, float, float, int]:
     import polars as pl
 
     tracemalloc.start()
     t0 = time.perf_counter()
-    df = pl.read_parquet(str(Path(data_path) / "*.parquet"))
+    # Polars reads s3:// natively via object_store; respects AWS_ENDPOINT_URL
+    df = pl.read_parquet(_glob_pattern(data_path))
     n = len(df)
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    # Sort by entity + timestamp, then compute gap-based session IDs
     df = df.sort(["episode_id", "timestamp"])
     df = (
         df.with_columns(
@@ -51,7 +112,6 @@ def _run_polars(data_path: str) -> tuple[int, float, float, float, int]:
         .drop(["_gap_s", "_is_new", "_sess_num"])
     )
 
-    # Session summary
     summary = (
         df.group_by("session_id")
         .agg(
@@ -73,14 +133,16 @@ def _run_duckdb(data_path: str) -> tuple[int, float, float, float, int]:
 
     tracemalloc.start()
     con = duckdb.connect(":memory:")
-    pattern = str(Path(data_path) / "*.parquet")
+    pattern = _glob_pattern(data_path)
+
+    if _is_s3_path(data_path):
+        _configure_duckdb_minio(con)
 
     t0 = time.perf_counter()
     n = con.execute(f"SELECT COUNT(*) FROM read_parquet('{pattern}')").fetchone()[0]
     load_time = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    # Gap detection via window functions
     result = con.execute(f"""
         WITH ordered AS (
             SELECT *,
@@ -115,10 +177,30 @@ def _run_pandas(data_path: str) -> tuple[int, float, float, float, int]:
     import pandas as pd
 
     tracemalloc.start()
-    files = sorted(Path(data_path).glob("*.parquet"))
 
-    t0 = time.perf_counter()
-    df = pd.concat([pd.read_parquet(str(f)) for f in files], ignore_index=True)
+    if _is_s3_path(data_path):
+        import s3fs
+        opts = _s3_storage_opts()
+        fs = s3fs.S3FileSystem(
+            endpoint_url=opts["endpoint_url"],
+            key=opts["key"],
+            secret=opts["secret"],
+        )
+        # fs.glob returns paths without s3:// prefix
+        s3_glob = _glob_pattern(data_path).replace("s3://", "")
+        raw_paths = fs.glob(s3_glob)
+        file_paths = ["s3://" + p for p in raw_paths]
+
+        t0 = time.perf_counter()
+        df = pd.concat(
+            [pd.read_parquet(f, storage_options=opts) for f in file_paths],
+            ignore_index=True,
+        )
+    else:
+        files = sorted(Path(data_path).glob("*.parquet"))
+        t0 = time.perf_counter()
+        df = pd.concat([pd.read_parquet(str(f)) for f in files], ignore_index=True)
+
     n = len(df)
     load_time = time.perf_counter() - t0
 
@@ -145,11 +227,16 @@ def _run_dask(data_path: str) -> tuple[int, float, float, float, int]:
     import dask.dataframe as dd
 
     tracemalloc.start()
-    pattern = str(Path(data_path) / "*.parquet")
+    pattern = _glob_pattern(data_path)
 
     t0 = time.perf_counter()
-    ddf = dd.read_parquet(pattern)
-    # Dask window functions require sorted partitions; materialize to pandas for HSM
+    if _is_s3_path(data_path):
+        opts = _s3_storage_opts()
+        ddf = dd.read_parquet(pattern, storage_options=opts)
+    else:
+        ddf = dd.read_parquet(pattern)
+
+    # Dask window functions require sorted partitions; materialize for HSM
     df = ddf.compute()
     n = len(df)
     load_time = time.perf_counter() - t0
@@ -174,9 +261,8 @@ def _run_pyspark(data_path: str, hardware_cfg: dict) -> tuple[int, float, float,
     """PySpark path — reuses session_detector.py."""
     import psutil
     from pyspark.sql import SparkSession
-
-    # Dynamically import so this file doesn't require PySpark at import time
     import sys
+
     repo_root = str(Path(__file__).parent.parent.parent)
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
@@ -186,15 +272,35 @@ def _run_pyspark(data_path: str, hardware_cfg: dict) -> tuple[int, float, float,
     mem_before = proc.memory_info().rss
     spark_cfg = hardware_cfg.get("spark_config", {})
 
-    spark = (
+    builder = (
         SparkSession.builder
         .appName("matrix-window-hsm")
         .master(spark_cfg.get("master", "local[*]"))
         .config("spark.driver.memory", spark_cfg.get("driver_memory", "8g"))
         .config("spark.sql.shuffle.partitions", str(spark_cfg.get("shuffle_partitions", 8)))
         .config("spark.ui.showConsoleProgress", "false")
-        .getOrCreate()
     )
+
+    # S3A / MinIO config for Spark
+    if data_path.startswith("s3a://"):
+        endpoint = os.environ.get("AWS_ENDPOINT_URL", "http://localhost:9000")
+        access_key = os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin")
+        secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin")
+        builder = (
+            builder
+            .config("spark.hadoop.fs.s3a.endpoint", endpoint)
+            .config("spark.hadoop.fs.s3a.access.key", access_key)
+            .config("spark.hadoop.fs.s3a.secret.key", secret_key)
+            .config("spark.hadoop.fs.s3a.path.style.access", "true")
+            .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+            .config(
+                "spark.hadoop.fs.s3a.aws.credentials.provider",
+                "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+            )
+            .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
+        )
+
+    spark = builder.getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
 
     t0 = time.perf_counter()
@@ -226,6 +332,7 @@ def _run_pyspark_rapids(data_path: str, hardware_cfg: dict) -> tuple[int, float,
     import psutil
     from pyspark.sql import SparkSession
     import sys
+
     repo_root = str(Path(__file__).parent.parent.parent)
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
@@ -285,7 +392,7 @@ def _run_cudf(data_path: str) -> tuple[int, float, float, float, int]:
     import cudf
 
     t0 = time.perf_counter()
-    df = cudf.read_parquet(str(Path(data_path) / "*.parquet"))
+    df = cudf.read_parquet(_glob_pattern(data_path))
     n = len(df)
     load_time = time.perf_counter() - t0
 
@@ -306,7 +413,6 @@ def _run_cudf(data_path: str) -> tuple[int, float, float, float, int]:
     gpu_mb = 0.0
     try:
         import pynvml
-
         pynvml.nvmlInit()
         h = pynvml.nvmlDeviceGetHandleByIndex(0)
         gpu_mb = pynvml.nvmlDeviceGetMemoryInfo(h).used / 1024 / 1024
