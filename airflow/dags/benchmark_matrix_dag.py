@@ -65,10 +65,10 @@ def _cpu_resources() -> k8s.V1ResourceRequirements:
 
 
 def _spark_driver_resources() -> k8s.V1ResourceRequirements:
-    """Spark driver pod: 2 cores + 3 GB (driver_memory=2g + overhead)."""
+    """Spark driver pod: 4 cores + 4 GB (local mode runs everything in driver)."""
     return k8s.V1ResourceRequirements(
-        requests={"cpu": "2", "memory": "3Gi"},
-        limits={"cpu": "2",   "memory": "3Gi"},
+        requests={"cpu": "4", "memory": "4Gi"},
+        limits={"cpu": "4",   "memory": "4Gi"},
     )
 
 
@@ -129,7 +129,11 @@ def make_task(
         "--hardware", "linux-k8s",
     ]
 
-    if profile in ("spark", "spark-rapids"):
+    if profile == "spark":
+        # Use local[*] mode for pyspark — avoids k8s executor pod scheduling issues
+        # and sufficient for our benchmark data sizes (1mb-10mb parquet)
+        cmd_args += ["--driver-memory", "3g"]
+    elif profile == "spark-rapids":
         cmd_args += [
             "--spark-master", SPARK_MASTER,
             "--executor-instances", "4",
