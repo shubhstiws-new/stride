@@ -10,6 +10,7 @@ Key techniques:
 - Cumulative sum for session ID assignment
 - Temporal joins for parent-child linking
 """
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
