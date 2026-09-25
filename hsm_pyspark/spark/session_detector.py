@@ -198,6 +198,7 @@ class SessionDetector:
         threshold_condition: str,
         sustained_seconds: float,
         session_name: str = "threshold",
+        sample_rate_hz: float = 10.0,
     ) -> DataFrame:
         """
         Detect sessions where a signal sustains a condition for a duration.
@@ -210,6 +211,7 @@ class SessionDetector:
             threshold_condition: Condition (e.g., "> 0.3")
             sustained_seconds: Minimum duration in seconds
             session_name: Name prefix
+            sample_rate_hz: Expected sampling rate of the monitored signal
 
         Returns:
             DataFrame with threshold-based sessions
@@ -222,10 +224,11 @@ class SessionDetector:
         session_col = f"{session_name}_session_id"
         sustained_ms = int(sustained_seconds * 1000)
 
-        # Window for time-based aggregation
+        # Window for time-based aggregation. Order by epoch milliseconds so the
+        # range bound (also milliseconds) is in the same unit.
         window_time = (
             Window.partitionBy(entity_key)
-            .orderBy(F.col(timestamp_col).cast("long"))
+            .orderBy((F.col(timestamp_col).cast("double") * 1000).cast("long"))
             .rangeBetween(-sustained_ms, 0)
         )
         window_seq = Window.partitionBy(entity_key).orderBy(timestamp_col)
@@ -253,7 +256,7 @@ class SessionDetector:
             # (assumes roughly consistent sampling rate)
             .withColumn(
                 "_threshold_active",
-                F.col("_sustained_count") >= (sustained_seconds * 10),  # 10 samples/sec
+                F.col("_sustained_count") >= (sustained_seconds * sample_rate_hz),
             )
             # Detect transitions
             .withColumn("_prev_active", F.lag("_threshold_active").over(window_seq))
