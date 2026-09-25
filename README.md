@@ -25,7 +25,7 @@ The project had two objectives:
 
 *Same workload on every engine (gap-based activity sessions plus threshold-based movement sessions over 1.56M base records), run on a single node. Raw results: [`benchmarks/results/scale_sweep_canonical_20260220.json`](benchmarks/results/scale_sweep_canonical_20260220.json).*
 
-1. **Below roughly 6 GB, Spark is the slowest option.** Polars was 9–110× faster. For most single-team workloads, a single-node columnar engine is the cost-effective choice.
+1. **Up to 6 GB, Spark was the slowest option.** Polars was 9–110× faster. For most single-team workloads, a single-node columnar engine is the cost-effective choice.
 2. **Spark was the only engine to complete at 30 GB.** Its advantage is memory behaviour at scale, not per-record speed.
 3. **The crossover depends on available memory, not on row count alone.** The practical decision rule is "does the working set fit in RAM with headroom?", not "is the data big?".
 
